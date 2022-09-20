@@ -74,6 +74,7 @@ type virtualHost struct {
 	PerTryTimeout   time.Duration
 	TlsKey          string
 	TlsCert         string
+	RetryOn         string
 }
 
 func (v *virtualHost) Equals(other *virtualHost) bool {
@@ -86,7 +87,8 @@ func (v *virtualHost) Equals(other *virtualHost) bool {
 		v.UpstreamCluster == other.UpstreamCluster &&
 		v.PerTryTimeout == other.PerTryTimeout &&
 		v.TlsKey == other.TlsKey &&
-		v.TlsCert == other.TlsCert
+		v.TlsCert == other.TlsCert &&
+		v.RetryOn == other.RetryOn
 }
 
 type LBHost struct {
@@ -295,6 +297,17 @@ func validateTlsSecret(secret *v1.Secret) (bool, error) {
 	return true, nil
 }
 
+func (envoyIng *envoyIngress) addRetryOn(ingress *k8s.Ingress) {
+	if ingress.Annotations["yggdrasil.uswitch.com/retry-on"] != "" {
+		retryOn := ingress.Annotations["yggdrasil.uswitch.com/retry-on"]
+		if !ValidateEnvoyRetryOn(retryOn) {
+			logrus.Warnf("invalid retry-on parameter for ingress %s/%s: %s", ingress.Namespace, ingress.Name, retryOn)
+			return
+		}
+		envoyIng.vhost.RetryOn = retryOn
+	}
+}
+
 func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v1.Secret) *envoyConfiguration {
 	cfg := &envoyConfiguration{}
 	envoyIngresses := map[string]*envoyIngress{}
@@ -327,6 +340,8 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 						envoyIngress.addTimeout(timeout)
 					}
 				}
+
+				envoyIngress.addRetryOn(i)
 
 				if syncSecrets && envoyIngress.vhost.TlsKey == "" && envoyIngress.vhost.TlsCert == "" {
 					if hostTlsSecret, err := getHostTlsSecret(i, ruleHost, secrets); err != nil {

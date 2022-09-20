@@ -76,11 +76,8 @@ Yggdrasil allows for some customisation of the route and cluster config per Ingr
 |--------------------------------------------------------------|----------|
 | [yggdrasil.uswitch.com/healthcheck-path](#health-check-path) | string   |
 | [yggdrasil.uswitch.com/timeout](#timeout)                    | duration |
-<<<<<<< HEAD
 | [yggdrasil.uswitch.com/weight](#weight)                      | uint32   |
-=======
 | [yggdrasil.uswitch.com/retry-on](#retries)                   | string   |
->>>>>>> configure-retry-on
 
 ### Health Check Path
 Specifies a path to configure a [HTTP health check](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/core/v3/health_check.proto#config-core-v3-healthcheck-httphealthcheck) to. Envoy will not route to clusters that fail health checks.
@@ -94,13 +91,11 @@ Allows for adjusting the timeout in envoy. Currently this will set the following
 * [config.route.v3.RetryPolicy.PerTryTimeout](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-retrypolicy-per-try-timeout)
 * [config.cluster.v3.Cluster.ConnectTimeout](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/cluster/v3/cluster.proto#envoy-v3-api-field-config-cluster-v3-cluster-connect-timeout)
 
-<<<<<<< HEAD
 ### Weight
 Allows for adjusting the [load balancer weights](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/endpoint/v3/endpoint_components.proto#config-endpoint-v3-lbendpoint) in envoy.
-=======
+
 ### Retries
 Allows overwriting the default retry policy's [config.route.v3.RetryPolicy.RetryOn](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-retrypolicy-retry-on) set by the `--retry-on` flag (default 5xx). Accepts a comma-separated list of retry-on policies.
->>>>>>> configure-retry-on
 
 ### Example
 Below is an example of an ingress with some of the annotations specified
@@ -114,11 +109,8 @@ metadata:
   annotations:
     yggdrasil.uswitch.com/healthcheck-path: /healthz
     yggdrasil.uswitch.com/timeout: 30s
-<<<<<<< HEAD
     yggdrasil.uswitch.com/weight: "12"
-=======
     yggdrasil.uswitch.com/retry-on: gateway-error,connect-failure
->>>>>>> configure-retry-on
 spec:
   rules:
   - host: example.com

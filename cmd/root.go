@@ -46,6 +46,7 @@ type config struct {
 	UseRemoteAddress           bool                      `json:"useRemoteAddress"`
 	HttpExtAuthz               envoy.HttpExtAuthz        `json:"httpExtAuthz"`
 	HttpGrpcLogger             envoy.HttpGrpcLogger      `json:"httpGrpcLogger"`
+	DefaultTimeouts            envoy.DefaultTimeouts     `json:"defaultTimeouts"`
 }
 
 // Hasher returns node ID as an ID
@@ -104,6 +105,9 @@ func init() {
 	rootCmd.PersistentFlags().Uint32("http-ext-authz-max-request-bytes", 8192, "Sets the maximum size of a message body that the filter will hold in memory")
 	rootCmd.PersistentFlags().Bool("http-ext-authz-allow-partial-message", true, "When this field is true, Envoy will buffer the message until max_request_bytes is reached")
 	rootCmd.PersistentFlags().Bool("http-ext-authz-failure-mode-allow", true, "Changes filters behaviour on errors")
+	rootCmd.PersistentFlags().Duration("default-route-timeout", 15*time.Second, "Default timeout of the routes")
+	rootCmd.PersistentFlags().Duration("default-cluster-timeout", 30*time.Second, "Default timeout of the cluster")
+	rootCmd.PersistentFlags().Duration("default-per-try-timeout", 5*time.Second, "Default timeout of PerTry")
 	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
 	viper.BindPFlag("address", rootCmd.PersistentFlags().Lookup("address"))
 	viper.BindPFlag("healthAddress", rootCmd.PersistentFlags().Lookup("health-address"))
@@ -133,6 +137,9 @@ func init() {
 	viper.BindPFlag("httpExtAuthz.maxRequestBytes", rootCmd.PersistentFlags().Lookup("http-ext-authz-max-request-bytes"))
 	viper.BindPFlag("httpExtAuthz.allowPartialMessage", rootCmd.PersistentFlags().Lookup("http-ext-authz-allow-partial-message"))
 	viper.BindPFlag("httpExtAuthz.FailureModeAllow", rootCmd.PersistentFlags().Lookup("http-ext-authz-failure-mode-allow"))
+	viper.BindPFlag("defaultTimeouts.Route", rootCmd.PersistentFlags().Lookup("default-route-timeout"))
+	viper.BindPFlag("defaultTimeouts.Cluster", rootCmd.PersistentFlags().Lookup("default-cluster-timeout"))
+	viper.BindPFlag("defaultTimeouts.PerTry", rootCmd.PersistentFlags().Lookup("default-per-try-timeout"))
 }
 
 func initConfig() {
@@ -233,6 +240,7 @@ func main(*cobra.Command, []string) error {
 		envoy.WithHttpExtAuthzCluster(c.HttpExtAuthz),
 		envoy.WithHttpGrpcLogger(c.HttpGrpcLogger),
 		envoy.WithSyncSecrets(c.SyncSecrets),
+		envoy.WithDefaultTimeouts(c.DefaultTimeouts),
 		envoy.WithDefaultRetryOn(viper.GetString("retryOn")),
 	)
 	snapshotter := envoy.NewSnapshotter(envoyCache, configurator, aggregator)

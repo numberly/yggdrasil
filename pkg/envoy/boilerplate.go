@@ -17,11 +17,13 @@ import (
 	hcfg "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	envoy_extension_http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	util "github.com/envoyproxy/go-control-plane/pkg/conversion"
 	types "github.com/golang/protobuf/ptypes"
 	any "github.com/golang/protobuf/ptypes/any"
 	"github.com/golang/protobuf/ptypes/duration"
 	"github.com/golang/protobuf/ptypes/wrappers"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -436,6 +438,39 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 		}
 	}
 
+	// httpOptions := &envoy_extension_http.HttpProtocolOptions{
+	// 	CommonHttpProtocolOptions: &core.HttpProtocolOptions{
+	// 		IdleTimeout:           &duration.Duration{Seconds: 60},
+	// 		MaxConnectionDuration: &durationpb.Duration{Seconds: 60},
+	// 	},
+	// 	UpstreamProtocolOptions: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_{
+	// 		ExplicitHttpConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig{
+	// 			ProtocolConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_HttpProtocolOptions{
+	// 				HttpProtocolOptions: &core.Http1ProtocolOptions{},
+	// 			},
+	// 		},
+	// 	},
+	// }
+	httpOptions := &envoy_extension_http.HttpProtocolOptions{
+		CommonHttpProtocolOptions: &core.HttpProtocolOptions{
+			IdleTimeout:           &duration.Duration{Seconds: 60},
+			MaxConnectionDuration: &durationpb.Duration{Seconds: 60},
+		},
+		UpstreamProtocolOptions: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_{
+			ExplicitHttpConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig{
+				ProtocolConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{
+					Http2ProtocolOptions: &core.Http2ProtocolOptions{
+						MaxConcurrentStreams: &wrapperspb.UInt32Value{Value: 128},
+					},
+				},
+			},
+		},
+	}
+	httpOptionsPb, err := anypb.New(httpOptions)
+	if err != nil {
+		log.Printf("Error marshaling httpOptions: %s", err)
+	}
+
 	cluster := &v3cluster.Cluster{
 		ClusterDiscoveryType: &v3cluster.Cluster_Type{Type: v3cluster.Cluster_STRICT_DNS},
 		Name:                 c.Name,
@@ -446,7 +481,11 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 				{LbEndpoints: endpoints},
 			},
 		},
-		HealthChecks: healthChecks,
+		HealthChecks:             healthChecks,
+		MaxRequestsPerConnection: &wrapperspb.UInt32Value{Value: 10000},
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": httpOptionsPb,
+		},
 	}
 	if outlierPercentage >= 0 {
 		cluster.OutlierDetection = &v3cluster.OutlierDetection{

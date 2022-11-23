@@ -15,11 +15,11 @@ import (
 	gal "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
 	eauthz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	hcfg "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
+	tls_inspector "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	envoy_extension_http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
-	util "github.com/envoyproxy/go-control-plane/pkg/conversion"
-	types "github.com/golang/protobuf/ptypes"
+	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	any "github.com/golang/protobuf/ptypes/any"
 	"github.com/golang/protobuf/ptypes/duration"
 	"github.com/golang/protobuf/ptypes/wrappers"
@@ -125,8 +125,10 @@ func makeHealthConfig() *hcfg.HealthCheck {
 		Headers: []*route.HeaderMatcher{
 			{
 				Name: ":path",
-				HeaderMatchSpecifier: &route.HeaderMatcher_ExactMatch{
-					ExactMatch: "/yggdrasil/status",
+				HeaderMatchSpecifier: &route.HeaderMatcher_StringMatch{
+					StringMatch: &matcherv3.StringMatcher{
+						MatchPattern: &matcherv3.StringMatcher_Exact{"/yggdrasil/status"},
+					},
 				},
 			},
 		},
@@ -175,22 +177,17 @@ func makeGrpcLoggerConfig(cfg HttpGrpcLogger) *gal.HttpGrpcAccessLogConfig {
 
 func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.VirtualHost) *hcm.HttpConnectionManager {
 	// Access Logs
-	accessLogConfig, err := util.MessageToStruct(
-		&eal.FileAccessLog{
-			Path: "/var/log/envoy/access.log",
-			AccessLogFormat: &eal.FileAccessLog_LogFormat{
-				LogFormat: &core.SubstitutionFormatString{
-					Format: &core.SubstitutionFormatString_JsonFormat{
-						JsonFormat: jsonFormat,
-					},
+	accessLogConfig := &eal.FileAccessLog{
+		Path: "/var/log/envoy/access.log",
+		AccessLogFormat: &eal.FileAccessLog_LogFormat{
+			LogFormat: &core.SubstitutionFormatString{
+				Format: &core.SubstitutionFormatString_JsonFormat{
+					JsonFormat: jsonFormat,
 				},
 			},
 		},
-	)
-	if err != nil {
-		log.Fatalf("failed to convert access log proto message to struct: %s", err)
 	}
-	anyAccessLogConfig, err := types.MarshalAny(accessLogConfig)
+	anyAccessLogConfig, err := anypb.New(accessLogConfig)
 	if err != nil {
 		log.Fatalf("failed to marshal access log config struct to typed struct: %s", err)
 	}
@@ -203,11 +200,7 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 	}
 
 	if c.httpGrpcLogger.Cluster != "" {
-		grpcLoggerConfig, err := util.MessageToStruct(makeGrpcLoggerConfig(c.httpGrpcLogger))
-		if err != nil {
-			log.Fatalf("failed to convert healthcheck proto message to struct: %s", err)
-		}
-		anyGrpcLoggerConfig, err := types.MarshalAny(grpcLoggerConfig)
+		anyGrpcLoggerConfig, err := anypb.New(makeGrpcLoggerConfig(c.httpGrpcLogger))
 		if err != nil {
 			log.Fatalf("failed to marshal healthcheck config struct to typed struct: %s", err)
 		}
@@ -220,11 +213,7 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 	// HTTP Filters
 	filterBuilder := &httpFilterBuilder{}
 
-	healthConfig, err := util.MessageToStruct(makeHealthConfig())
-	if err != nil {
-		log.Fatalf("failed to convert healthcheck proto message to struct: %s", err)
-	}
-	anyHealthConfig, err := types.MarshalAny(healthConfig)
+	anyHealthConfig, err := anypb.New(makeHealthConfig())
 	if err != nil {
 		log.Fatalf("failed to marshal healthcheck config struct to typed struct: %s", err)
 	}
@@ -235,11 +224,7 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 	})
 
 	if c.httpExtAuthz.Cluster != "" {
-		extAuthzConfig, err := util.MessageToStruct(makeExtAuthzConfig(c.httpExtAuthz))
-		if err != nil {
-			log.Fatalf("failed to convert extAuthz proto message to struct: %s", err)
-		}
-		anyExtAuthzConfig, err := types.MarshalAny(extAuthzConfig)
+		anyExtAuthzConfig, err := anypb.New(makeExtAuthzConfig(c.httpExtAuthz))
 		if err != nil {
 			log.Fatalf("failed to marshal extAuthz config struct to typed struct: %s", err)
 		}
@@ -273,11 +258,7 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 
 func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtualHosts []*route.VirtualHost) (listener.FilterChain, error) {
 	httpConnectionManager := c.makeConnectionManager(virtualHosts)
-	httpConfig, err := util.MessageToStruct(httpConnectionManager)
-	if err != nil {
-		return listener.FilterChain{}, fmt.Errorf("failed to convert virtualHost to envoy control plane struct: %s", err)
-	}
-	anyHttpConfig, err := types.MarshalAny(httpConfig)
+	anyHttpConfig, err := anypb.New(httpConnectionManager)
 	if err != nil {
 		return listener.FilterChain{}, fmt.Errorf("failed to marshal HTTP config struct to typed struct: %s", err)
 	}
@@ -299,7 +280,7 @@ func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtua
 		},
 	}
 
-	anyTls, err := types.MarshalAny(tls)
+	anyTls, err := anypb.New(tls)
 	if err != nil {
 		return listener.FilterChain{}, fmt.Errorf("failed to marshal TLS config struct to typed struct: %s", err)
 	}
@@ -334,6 +315,11 @@ func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtua
 }
 
 func makeListener(filterChains []*listener.FilterChain, envoyListenerIpv4Address string, envoyListenPort uint32) *listener.Listener {
+	// TODO make typedConfigs static
+	tlsInspectorConfig, err := anypb.New(&tls_inspector.TlsInspector{})
+	if err != nil {
+		log.Fatalf("failed to marshal tls_inspector config struct to typed struct: %s", err)
+	}
 
 	listener := listener.Listener{
 		Name: "listener_0",
@@ -348,7 +334,10 @@ func makeListener(filterChains []*listener.FilterChain, envoyListenerIpv4Address
 			},
 		},
 		ListenerFilters: []*listener.ListenerFilter{
-			{Name: "envoy.filters.listener.tls_inspector"},
+			{
+				Name:       "envoy.filters.listener.tls_inspector",
+				ConfigType: &listener.ListenerFilter_TypedConfig{TypedConfig: tlsInspectorConfig},
+			},
 		},
 		FilterChains: filterChains,
 		// Setting the TrafficDirection here for tracing
@@ -421,7 +410,7 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 	var anyTls *any.Any
 
 	if tls != nil {
-		anyTls, err = types.MarshalAny(tls)
+		anyTls, err = anypb.New(tls)
 		if err != nil {
 			log.Printf("Error marhsalling cluster TLS config: %s", err)
 		}
@@ -453,8 +442,9 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 	// }
 	httpOptions := &envoy_extension_http.HttpProtocolOptions{
 		CommonHttpProtocolOptions: &core.HttpProtocolOptions{
-			IdleTimeout:           &duration.Duration{Seconds: 60},
-			MaxConnectionDuration: &durationpb.Duration{Seconds: 60},
+			IdleTimeout:              &duration.Duration{Seconds: 60},
+			MaxConnectionDuration:    &durationpb.Duration{Seconds: 60},
+			MaxRequestsPerConnection: &wrapperspb.UInt32Value{Value: 10000},
 		},
 		UpstreamProtocolOptions: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_{
 			ExplicitHttpConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig{
@@ -468,7 +458,7 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 	}
 	httpOptionsPb, err := anypb.New(httpOptions)
 	if err != nil {
-		log.Printf("Error marshaling httpOptions: %s", err)
+		log.Fatalf("Error marshaling httpOptions: %s", err)
 	}
 
 	cluster := &v3cluster.Cluster{
@@ -481,8 +471,7 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 				{LbEndpoints: endpoints},
 			},
 		},
-		HealthChecks:             healthChecks,
-		MaxRequestsPerConnection: &wrapperspb.UInt32Value{Value: 10000},
+		HealthChecks: healthChecks,
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
 			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": httpOptionsPb,
 		},

@@ -71,6 +71,7 @@ type KubernetesConfigurator struct {
 	httpGrpcLogger             HttpGrpcLogger
 	defaultTimeouts            DefaultTimeouts
 	defaultRetryOn             string
+	alpnProtocols              []string
 
 	previousConfig  *envoyConfiguration
 	listenerVersion string

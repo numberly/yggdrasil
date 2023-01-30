@@ -250,9 +250,10 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 				VirtualHosts: virtualHosts,
 			},
 		},
-		Tracing:          &hcm.HttpConnectionManager_Tracing{},
-		AccessLog:        accessLoggers,
-		UseRemoteAddress: &wrapperspb.BoolValue{Value: c.useRemoteAddress},
+		Tracing:               &hcm.HttpConnectionManager_Tracing{},
+		AccessLog:             accessLoggers,
+		UseRemoteAddress:      &wrapperspb.BoolValue{Value: c.useRemoteAddress},
+		StripMatchingHostPort: true,
 	}
 }
 

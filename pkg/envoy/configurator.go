@@ -53,7 +53,7 @@ type HttpGrpcLogger struct {
 	AdditionalResponseHeaders []string      `json:"additionalResponseHeaders"`
 }
 
-//KubernetesConfigurator takes a given Ingress Class and lister to find only ingresses of that class
+// KubernetesConfigurator takes a given Ingress Class and lister to find only ingresses of that class
 type KubernetesConfigurator struct {
 	ingressClasses             []string
 	nodeID                     string
@@ -62,7 +62,7 @@ type KubernetesConfigurator struct {
 	trustCA                    string
 	upstreamPort               uint32
 	envoyListenPort            uint32
-	envoyListenerIpv4Address   string
+	envoyListenerIpv4Address   []string
 	outlierPercentage          int32
 	hostSelectionRetryAttempts int64
 	upstreamHealthCheck        UpstreamHealthCheck
@@ -79,7 +79,7 @@ type KubernetesConfigurator struct {
 	sync.Mutex
 }
 
-//NewKubernetesConfigurator returns a Kubernetes configurator given a lister and ingress class
+// NewKubernetesConfigurator returns a Kubernetes configurator given a lister and ingress class
 func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca string, ingressClasses []string, options ...option) *KubernetesConfigurator {
 	c := &KubernetesConfigurator{ingressClasses: ingressClasses, nodeID: nodeID, certificates: certificates, trustCA: ca}
 	for _, opt := range options {
@@ -88,7 +88,7 @@ func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca str
 	return c
 }
 
-//Generate creates a new snapshot
+// Generate creates a new snapshot
 func (c *KubernetesConfigurator) Generate(ingresses []*k8s.Ingress, secrets []*v1.Secret) cache.Snapshot {
 	c.Lock()
 	defer c.Unlock()
@@ -118,7 +118,7 @@ func (c *KubernetesConfigurator) Generate(ingresses []*k8s.Ingress, secrets []*v
 	return snap
 }
 
-//NodeID returns the NodeID
+// NodeID returns the NodeID
 func (c *KubernetesConfigurator) NodeID() string {
 	return c.nodeID
 

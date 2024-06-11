@@ -176,7 +176,7 @@ Maintenance is a new mode that allow to set a cluster in maintenance mode :
 
 This is optional and equal to `false` by default.
 
-kubernetesClusterName is the name of the cluster, its only for information and will be used for metrics. Optional default to `""`
+kubernetesClusterName is the name of the cluster, it's only for information and will be used for metrics. Optional defaults to `""`
 
 ## Metrics
 Yggdrasil has a number of Go, gRPC, Prometheus, and Yggdrasil-specific metrics built in which can be reached by cURLing the `/metrics` path at the health API address/port (default: 8081). See [Flags](#Flags) for more information on configuring the health API address/port.

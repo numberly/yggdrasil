@@ -190,7 +190,7 @@ The Yggdrasil-specific metrics which are available from the API are:
 | yggdrasil_ingresses                          | Total number of matching ingress objects       | gauge    |
 | yggdrasil_listener_updates                   | Number of times the listener has been updated  | counter  |
 | yggdrasil_virtual_hosts                      | Total number of virtual hosts generated        | gauge    |
-| yggdrasil_kubernetes_clusters_in_maintenance | Return 1 if cluster in maintenance or 0        | gauge    |
+| yggdrasil_kubernetes_cluster_in_maintenance | Return 1 if cluster in maintenance or 0        | gauge    |
 | yggdrasil_upstream_info                      | Provide informations relate to upstream        | gauge    |
 
 ## Flags

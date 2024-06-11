@@ -397,6 +397,7 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 		// Add upstreams based on maintenance status
 		for _, ingress := range ingressList {
 			for _, j := range ingress.Upstreams {
+				// Skip this upstream if cluster is in maintenance but keep it if no other cluster can serve it 
 				if !hasNonMaintenance || !ingress.Maintenance {
 					// Check if the upstream is already added
 					exists := false

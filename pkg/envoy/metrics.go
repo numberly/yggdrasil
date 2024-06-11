@@ -46,7 +46,7 @@ var (
 	KubernetesClusterInMaintenance = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "yggdrasil",
-			Name:      "kubernetes_clusters_in_maintenance",
+			Name:      "kubernetes_cluster_in_maintenance",
 			Help:      "Is kubernetes cluster in maintenance mode ?",
 		},
 		[]string{"apiServer"},

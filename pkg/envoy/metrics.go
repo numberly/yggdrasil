@@ -42,8 +42,17 @@ var (
 			Help:      "Number of times the listener has been updated",
 		},
 	)
+
+	KubernetesClusterInMaintenance = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "yggdrasil",
+			Name:      "kubernetes_clusters",
+			Help:      "Is kubernetes cluster in maintenance mode ?",
+		},
+		[]string{"apiServer"},
+	)
 )
 
 func init() {
-	prometheus.MustRegister(matchingIngresses, numClusters, numVhosts, clusterUpdates, listenerUpdates)
+	prometheus.MustRegister(matchingIngresses, numClusters, numVhosts, clusterUpdates, listenerUpdates, KubernetesClusterInMaintenance)
 }

@@ -21,6 +21,7 @@ type Ingress struct {
 	RulesHosts  []string
 	Upstreams   []string
 	TLS         map[string]*IngressTLS
+	Maintenance bool
 }
 
 // IngressTLS describes the transport layer security associated with an Ingress.
@@ -33,9 +34,9 @@ type IngressTLS struct {
 func (a *Aggregator) GetGenericIngresses() ([]*Ingress, error) {
 	ing := make([]*Ingress, 0)
 	for _, store := range a.ingressStores {
-		ingresses := store.List()
+		ingresses := store.Store.List()
 		for _, obj := range ingresses {
-			genericIng, err := convertToGenericIngress(obj)
+			genericIng, err := convertToGenericIngress(obj, store.Maintenance)
 			if err != nil {
 				return nil, err
 			}
@@ -46,33 +47,33 @@ func (a *Aggregator) GetGenericIngresses() ([]*Ingress, error) {
 }
 
 // Convert k8s ingress to apiGroup-agnostic ingress
-func convertToGenericIngress(ing interface{}) (ingress *Ingress, err error) {
+func convertToGenericIngress(ing interface{}, maintenance bool) (ingress *Ingress, err error) {
 	switch t := ing.(type) {
 	case *extensionsv1beta1.Ingress:
 		i, ok := ing.(*extensionsv1beta1.Ingress)
 		if !ok {
 			return nil, fmt.Errorf("unexpected object in store: %+v", ing)
 		}
-		ingress = convertExtensionsv1beta1Ingress(i)
+		ingress = convertExtensionsv1beta1Ingress(i, maintenance)
 	case *networkingv1beta1.Ingress:
 		i, ok := ing.(*networkingv1beta1.Ingress)
 		if !ok {
 			return nil, fmt.Errorf("unexpected object in store: %+v", ing)
 		}
-		ingress = convertNetworkingv1beta1Ingress(i)
+		ingress = convertNetworkingv1beta1Ingress(i, maintenance)
 	case *networkingv1.Ingress:
 		i, ok := ing.(*networkingv1.Ingress)
 		if !ok {
 			return nil, fmt.Errorf("unexpected object in store: %+v", ing)
 		}
-		ingress = convertNetworkingv1Ingress(i)
+		ingress = convertNetworkingv1Ingress(i, maintenance)
 	default:
 		err = fmt.Errorf("unrecognized type for: %T", t)
 	}
 	return
 }
 
-func convertExtensionsv1beta1Ingress(i *extensionsv1beta1.Ingress) *Ingress {
+func convertExtensionsv1beta1Ingress(i *extensionsv1beta1.Ingress, maintenance bool) *Ingress {
 	return &Ingress{
 		Namespace:   i.Namespace,
 		Name:        i.Name,
@@ -106,10 +107,11 @@ func convertExtensionsv1beta1Ingress(i *extensionsv1beta1.Ingress) *Ingress {
 			}
 			return
 		}(i.Spec.TLS),
+		Maintenance: maintenance,
 	}
 }
 
-func convertNetworkingv1beta1Ingress(i *networkingv1beta1.Ingress) *Ingress {
+func convertNetworkingv1beta1Ingress(i *networkingv1beta1.Ingress, maintenance bool) *Ingress {
 	return &Ingress{
 		Namespace:   i.Namespace,
 		Name:        i.Name,
@@ -143,10 +145,11 @@ func convertNetworkingv1beta1Ingress(i *networkingv1beta1.Ingress) *Ingress {
 			}
 			return
 		}(i.Spec.TLS),
+		Maintenance: maintenance,
 	}
 }
 
-func convertNetworkingv1Ingress(i *networkingv1.Ingress) *Ingress {
+func convertNetworkingv1Ingress(i *networkingv1.Ingress, maintenance bool) *Ingress {
 	return &Ingress{
 		Namespace:   i.Namespace,
 		Name:        i.Name,
@@ -180,6 +183,7 @@ func convertNetworkingv1Ingress(i *networkingv1.Ingress) *Ingress {
 			}
 			return
 		}(i.Spec.TLS),
+		Maintenance: maintenance,
 	}
 }
 

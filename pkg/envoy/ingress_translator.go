@@ -428,7 +428,6 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 					}
 				} else {
 					logrus.Warnf("Endpoint is in maintenance mode, upstream %s will not be added for host %s", j, ruleHost)
-					//envoyIngress.addUpstream(j, 0)
 				}
 			}
 

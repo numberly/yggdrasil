@@ -15,8 +15,9 @@ import (
 )
 
 type IngressStore struct {
-	Store       cache.Store
-	Maintenance bool
+	Store                 cache.Store
+	Maintenance           bool
+	KubernetesClusterName string
 }
 
 type Aggregator struct {
@@ -61,8 +62,9 @@ func NewAggregator(k8sClients []KubernetesConfig, ctx context.Context, syncSecre
 		a.EventsIngresses(ctx, ingressInformer)
 
 		ingressStore := IngressStore{
-			Store:       ingressInformer.GetStore(),
-			Maintenance: c.maintenance,
+			Store:                 ingressInformer.GetStore(),
+			Maintenance:           c.maintenance,
+			KubernetesClusterName: c.kubernetesClusterName,
 		}
 
 		a.ingressStores = append(a.ingressStores, ingressStore)

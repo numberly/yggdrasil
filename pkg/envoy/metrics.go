@@ -46,13 +46,22 @@ var (
 	KubernetesClusterInMaintenance = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "yggdrasil",
-			Name:      "kubernetes_clusters",
+			Name:      "kubernetes_clusters_in_maintenance",
 			Help:      "Is kubernetes cluster in maintenance mode ?",
 		},
 		[]string{"apiServer"},
 	)
+
+	EnvoyUpstreamInfo = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "yggdrasil",
+			Name:      "upstream_info",
+			Help:      "Retrieve information about cluster",
+		},
+		[]string{"envoy_cluster_name", "upstream", "namespace", "ingressclass", "k8s_cluster", "ingress"},
+	)
 )
 
 func init() {
-	prometheus.MustRegister(matchingIngresses, numClusters, numVhosts, clusterUpdates, listenerUpdates, KubernetesClusterInMaintenance)
+	prometheus.MustRegister(matchingIngresses, numClusters, numVhosts, clusterUpdates, listenerUpdates, KubernetesClusterInMaintenance, EnvoyUpstreamInfo)
 }

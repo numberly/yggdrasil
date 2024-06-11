@@ -3,14 +3,16 @@ package k8s
 import kube "k8s.io/client-go/kubernetes"
 
 type KubernetesConfig struct {
-	source      *kube.Clientset
-	maintenance bool
+	source                *kube.Clientset
+	maintenance           bool
+	kubernetesClusterName string
 }
 
-func NewKubernetesConfig(maintenance bool, clientset *kube.Clientset) *KubernetesConfig {
+func NewKubernetesConfig(maintenance bool, clientset *kube.Clientset, kubernetesClusterName string) *KubernetesConfig {
 	return &KubernetesConfig{
-		source:      clientset,
-		maintenance: maintenance,
+		source:                clientset,
+		maintenance:           maintenance,
+		kubernetesClusterName: kubernetesClusterName,
 	}
 }
 

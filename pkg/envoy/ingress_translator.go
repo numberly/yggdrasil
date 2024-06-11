@@ -410,13 +410,20 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 						continue // skip if the upstream already exists
 					}
 
+					class := "none"
+					if ingress.Class != nil {
+						class = *ingress.Class
+					}
+
 					// Add upstream
 					if weight64, err := strconv.ParseUint(ingress.Annotations["yggdrasil.uswitch.com/weight"], 10, 32); err == nil {
 						if weight64 != 0 {
 							envoyIngress.addUpstream(j, uint32(weight64))
+							EnvoyUpstreamInfo.WithLabelValues(strings.ReplaceAll(ruleHost, ".", "_"), j, ingress.Namespace, class, ingress.KubernetesClusterName, ingress.Name).Set(float64(1))
 						}
 					} else {
 						envoyIngress.addUpstream(j, 1)
+						EnvoyUpstreamInfo.WithLabelValues(strings.ReplaceAll(ruleHost, ".", "_"), j, ingress.Namespace, class, ingress.KubernetesClusterName, ingress.Name).Set(float64(1))
 					}
 				} else {
 					logrus.Warnf("Endpoint is in maintenance mode, upstream %s will not be added for host %s", j, ruleHost)

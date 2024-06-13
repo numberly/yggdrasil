@@ -78,7 +78,7 @@ func TestGenerate(t *testing.T) {
 
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*"}, Cert: "b", Key: "c"},
-	}, "d", []string{"bar"})
+	}, "d", []string{"bar"}, "/var/log/envoy/")
 
 	snapshot := configurator.Generate(ingresses, []*v1.Secret{})
 
@@ -99,7 +99,7 @@ func TestGenerateMultipleCerts(t *testing.T) {
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
 		{Hosts: []string{"*.internal.api.co.uk"}, Cert: "couk", Key: "couk"},
-	}, "d", []string{"bar"})
+	}, "d", []string{"bar"}, "/var/log/envoy/")
 
 	snapshot := configurator.Generate(ingresses, []*v1.Secret{})
 	listener := snapshot.Resources[tcache.Listener].Items["listener_0"].Resource.(*listener.Listener)
@@ -120,7 +120,7 @@ func TestGenerateMultipleHosts(t *testing.T) {
 
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com", "*.internal.api.co.uk"}, Cert: "com", Key: "com"},
-	}, "d", []string{"bar"})
+	}, "d", []string{"bar"}, "/var/log/envoy/")
 
 	snapshot := configurator.Generate(ingresses, []*v1.Secret{})
 	listener := snapshot.Resources[tcache.Listener].Items["listener_0"].Resource.(*listener.Listener)
@@ -141,7 +141,7 @@ func TestGenerateNoMatchingCert(t *testing.T) {
 
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
-	}, "d", []string{"bar"})
+	}, "d", []string{"bar"}, "/var/log/envoy/")
 
 	snapshot := configurator.Generate(ingresses, []*v1.Secret{})
 	listener := snapshot.Resources[tcache.Listener].Items["listener_0"].Resource.(*listener.Listener)
@@ -159,7 +159,7 @@ func TestGenerateIntoTwoCerts(t *testing.T) {
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
 		{Hosts: []string{"*"}, Cert: "all", Key: "all"},
-	}, "d", []string{"bar"})
+	}, "d", []string{"bar"}, "/var/log/envoy/")
 
 	snapshot := configurator.Generate(ingresses, []*v1.Secret{})
 	listener := snapshot.Resources[tcache.Listener].Items["listener_0"].Resource.(*listener.Listener)
@@ -228,7 +228,7 @@ func TestGenerateListeners(t *testing.T) {
 	}
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			configurator := NewKubernetesConfigurator("a", tc.certs, "", nil)
+			configurator := NewKubernetesConfigurator("a", tc.certs, "", nil, "/var/log/envoy/")
 			ret := configurator.generateListeners(&envoyConfiguration{VirtualHosts: tc.virtualHost})
 			listener := ret[0].(*listener.Listener)
 			if len(listener.FilterChains) != 1 {

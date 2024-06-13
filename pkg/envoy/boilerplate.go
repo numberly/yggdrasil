@@ -3,6 +3,7 @@ package envoy
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 
 	cal "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
@@ -175,10 +176,10 @@ func makeGrpcLoggerConfig(cfg HttpGrpcLogger) *gal.HttpGrpcAccessLogConfig {
 	}
 }
 
-func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.VirtualHost) *hcm.HttpConnectionManager {
+func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.VirtualHost, accessLog string) *hcm.HttpConnectionManager {
 	// Access Logs
 	accessLogConfig := &eal.FileAccessLog{
-		Path: "/var/log/envoy/access.log",
+		Path: filepath.Join(accessLog, "access.log"),
 		AccessLogFormat: &eal.FileAccessLog_LogFormat{
 			LogFormat: &core.SubstitutionFormatString{
 				Format: &core.SubstitutionFormatString_JsonFormat{
@@ -257,8 +258,8 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 	}
 }
 
-func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtualHosts []*route.VirtualHost) (listener.FilterChain, error) {
-	httpConnectionManager := c.makeConnectionManager(virtualHosts)
+func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtualHosts []*route.VirtualHost, accessLog string) (listener.FilterChain, error) {
+	httpConnectionManager := c.makeConnectionManager(virtualHosts, accessLog)
 	anyHttpConfig, err := anypb.New(httpConnectionManager)
 	if err != nil {
 		return listener.FilterChain{}, fmt.Errorf("failed to marshal HTTP config struct to typed struct: %s", err)

@@ -405,17 +405,15 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 
 				if isWildcard {
 					if i.Annotations["yggdrasil.uswitch.com/healthcheck-host"] != "" {
-						envoyIngress.addHealthCheckHost(i.Annotations["yggdrasil.uswitch.com/healthcheck-host"])
-						if !validateSubdomain(ruleHost, envoyIngress.cluster.HealthCheckHost) {
+						if validateSubdomain(ruleHost, envoyIngress.cluster.HealthCheckHost) {
+							envoyIngress.addHealthCheckHost(i.Annotations["yggdrasil.uswitch.com/healthcheck-host"])
+						} else {
 							logrus.Warnf("Healthcheck %s is not on the same subdomain for %s, annotation will be skipped", envoyIngress.cluster.HealthCheckHost, ruleHost)
 							envoyIngress.removeHealthCheckPath()
-							envoyIngress.removeHealthCheckHost()
 						}
 					} else {
 						logrus.Warnf("Be careful, healthcheck can't work for wildcard host : %s", ruleHost)
 						envoyIngress.removeHealthCheckPath()
-						envoyIngress.removeHealthCheckHost()
-
 					}
 				}
 

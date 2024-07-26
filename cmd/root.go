@@ -314,7 +314,7 @@ func createSources(clusters []clusterConfig) ([]k8s.KubernetesConfig, error) {
 
 		if cluster.Maintenance {
 			envoy.KubernetesClusterInMaintenance.WithLabelValues(cluster.APIServer).Set(float64(1))
-			log.Warnf("Cluster with API Endpoint %s is in maintenance mode", cluster.APIServer)
+			log.Warnf("Kubernetes Cluster with API Endpoint %s is in maintenance mode", cluster.APIServer)
 		} else {
 			allInMaintenance = false
 		}

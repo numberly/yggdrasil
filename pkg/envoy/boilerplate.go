@@ -3,6 +3,7 @@ package envoy
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 
 	cal "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
@@ -11,12 +12,14 @@ import (
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	tracing "github.com/envoyproxy/go-control-plane/envoy/config/trace/v3"
 	eal "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
 	gal "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
 	eauthz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	hcfg "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	tls_inspector "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	previousHosts "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/host/previous_hosts/v3"
 	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	envoy_extension_http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
@@ -32,35 +35,30 @@ import (
 var (
 	jsonFormat      *structpb.Struct
 	allowedRetryOns map[string]bool
+
+	DefaultAccessLogFormat = map[string]interface{}{
+		"bytes_received":            "%BYTES_RECEIVED%",
+		"bytes_sent":                "%BYTES_SENT%",
+		"downstream_local_address":  "%DOWNSTREAM_LOCAL_ADDRESS%",
+		"downstream_remote_address": "%DOWNSTREAM_REMOTE_ADDRESS%",
+		"duration":                  "%DURATION%",
+		"forwarded_for":             "%REQ(X-FORWARDED-FOR)%",
+		"protocol":                  "%PROTOCOL%",
+		"request_id":                "%REQ(X-REQUEST-ID)%",
+		"request_method":            "%REQ(:METHOD)%",
+		"request_path":              "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%",
+		"response_code":             "%RESPONSE_CODE%",
+		"response_flags":            "%RESPONSE_FLAGS%",
+		"start_time":                "%START_TIME(%s.%3f)%",
+		"upstream_cluster":          "%UPSTREAM_CLUSTER%",
+		"upstream_host":             "%UPSTREAM_HOST%",
+		"upstream_local_address":    "%UPSTREAM_LOCAL_ADDRESS%",
+		"upstream_service_time":     "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%",
+		"user_agent":                "%REQ(USER-AGENT)%",
+	}
 )
 
 func init() {
-	format := map[string]interface{}{
-		"start_time":                "%START_TIME(%s.%3f)%",
-		"bytes_received":            "%BYTES_RECEIVED%",
-		"protocol":                  "%PROTOCOL%",
-		"response_code":             "%RESPONSE_CODE%",
-		"bytes_sent":                "%BYTES_SENT%",
-		"duration":                  "%DURATION%",
-		"response_flags":            "%RESPONSE_FLAGS%",
-		"upstream_host":             "%UPSTREAM_HOST%",
-		"upstream_cluster":          "%UPSTREAM_CLUSTER%",
-		"upstream_local_address":    "%UPSTREAM_LOCAL_ADDRESS%",
-		"downstream_remote_address": "%DOWNSTREAM_REMOTE_ADDRESS%",
-		"downstream_local_address":  "%DOWNSTREAM_LOCAL_ADDRESS%",
-		"request_method":            "%REQ(:METHOD)%",
-		"request_path":              "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%",
-		"upstream_service_time":     "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%",
-		"forwarded_for":             "%REQ(X-FORWARDED-FOR)%",
-		"user_agent":                "%REQ(USER-AGENT)%",
-		"request_id":                "%REQ(X-REQUEST-ID)%",
-	}
-	b, err := structpb.NewValue(format)
-	if err != nil {
-		log.Fatal(err)
-	}
-	jsonFormat = b.GetStructValue()
-
 	allowedRetryOns = map[string]bool{
 		"5xx":                        true,
 		"gateway-error":              true,
@@ -75,7 +73,7 @@ func init() {
 	}
 }
 
-func makeVirtualHost(vhost *virtualHost, reselectionAttempts int64, defaultRetryOn string) *route.VirtualHost {
+func makeVirtualHost(vhost *virtualHost, reselectionAttempts int64, defaultRetryOn string) (*route.VirtualHost, error) {
 	retryOn := vhost.RetryOn
 	if retryOn == "" {
 		retryOn = defaultRetryOn
@@ -94,10 +92,18 @@ func makeVirtualHost(vhost *virtualHost, reselectionAttempts int64, defaultRetry
 		},
 	}
 
+	hosts := &previousHosts.PreviousHostsPredicate{}
+
+	anyHosts, err := anypb.New(hosts)
+	if err != nil {
+		return &route.VirtualHost{}, fmt.Errorf("failed to marshal hosts config struct to typed struct: %s", err)
+	}
+
 	if reselectionAttempts >= 0 {
 		action.Route.RetryPolicy.RetryHostPredicate = []*route.RetryPolicy_RetryHostPredicate{
 			{
-				Name: "envoy.retry_host_predicates.previous_hosts",
+				Name:       "envoy.retry_host_predicates.previous_hosts",
+				ConfigType: &route.RetryPolicy_RetryHostPredicate_TypedConfig{TypedConfig: anyHosts},
 			},
 		}
 		action.Route.RetryPolicy.HostSelectionRetryMaxAttempts = reselectionAttempts
@@ -116,7 +122,7 @@ func makeVirtualHost(vhost *virtualHost, reselectionAttempts int64, defaultRetry
 			},
 		},
 	}
-	return &virtualHost
+	return &virtualHost, nil
 }
 
 func makeHealthConfig() *hcfg.HealthCheck {
@@ -127,7 +133,7 @@ func makeHealthConfig() *hcfg.HealthCheck {
 				Name: ":path",
 				HeaderMatchSpecifier: &route.HeaderMatcher_StringMatch{
 					StringMatch: &matcherv3.StringMatcher{
-						MatchPattern: &matcherv3.StringMatcher_Exact{"/yggdrasil/status"},
+						MatchPattern: &matcherv3.StringMatcher_Exact{Exact: "/yggdrasil/status"},
 					},
 				},
 			},
@@ -151,6 +157,7 @@ func makeExtAuthzConfig(cfg HttpExtAuthz) *eauthz.ExtAuthz {
 		WithRequestBody: &eauthz.BufferSettings{
 			MaxRequestBytes:     cfg.MaxRequestBytes,
 			AllowPartialMessage: cfg.AllowPartialMessage,
+			PackAsBytes:         cfg.PackAsBytes,
 		},
 		FailureModeAllow: cfg.FailureModeAllow,
 	}
@@ -170,15 +177,25 @@ func makeGrpcLoggerConfig(cfg HttpGrpcLogger) *gal.HttpGrpcAccessLogConfig {
 			},
 			TransportApiVersion: core.ApiVersion_V3,
 		},
-		AdditionalRequestHeadersToLog:  cfg.AdditionalRequestHeaders,
-		AdditionalResponseHeadersToLog: cfg.AdditionalResponseHeaders,
+		AdditionalRequestHeadersToLog:  cfg.RequestHeaders,
+		AdditionalResponseHeadersToLog: cfg.ResponseHeaders,
 	}
 }
 
-func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.VirtualHost) *hcm.HttpConnectionManager {
-	// Access Logs
+func makeFileAccessLog(cfg AccessLogger, accessLog string) *eal.FileAccessLog {
+	format := DefaultAccessLogFormat
+	if len(cfg.Format) > 0 {
+		format = cfg.Format
+	}
+
+	b, err := structpb.NewValue(format)
+	if err != nil {
+		log.Fatal(err)
+	}
+	jsonFormat = b.GetStructValue()
+
 	accessLogConfig := &eal.FileAccessLog{
-		Path: "/var/log/envoy/access.log",
+		Path: filepath.Join(accessLog, "access.log"),
 		AccessLogFormat: &eal.FileAccessLog_LogFormat{
 			LogFormat: &core.SubstitutionFormatString{
 				Format: &core.SubstitutionFormatString_JsonFormat{
@@ -187,6 +204,23 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 			},
 		},
 	}
+
+	return accessLogConfig
+}
+
+func makeZipkinTracingProvider() *tracing.ZipkinConfig {
+	zipkinTracingProviderConfig := &tracing.ZipkinConfig{
+		CollectorCluster:         "zipkin",
+		CollectorEndpoint:        "/api/v2/spans",
+		CollectorEndpointVersion: tracing.ZipkinConfig_HTTP_JSON,
+	}
+
+	return zipkinTracingProviderConfig
+}
+
+func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.VirtualHost, accessLog string) (*hcm.HttpConnectionManager, error) {
+	// Access Logs
+	accessLogConfig := makeFileAccessLog(c.accessLogger, accessLog)
 	anyAccessLogConfig, err := anypb.New(accessLogConfig)
 	if err != nil {
 		log.Fatalf("failed to marshal access log config struct to typed struct: %s", err)
@@ -235,10 +269,29 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 		})
 	}
 
+	filter, err := filterBuilder.Filters()
+	if err != nil {
+		return &hcm.HttpConnectionManager{}, err
+	}
+
+	tracingConfig := &hcm.HttpConnectionManager_Tracing{}
+
+	if c.tracingProvider == "zipkin" {
+		zipkinTracingProvider, err := anypb.New(makeZipkinTracingProvider())
+		if err != nil {
+			log.Fatalf("failed to set zipkin tracing provider config: %s", err)
+		}
+
+		tracingConfig.Provider = &tracing.Tracing_Http{
+			Name:       "config.trace.v3.Tracing.Http",
+			ConfigType: &tracing.Tracing_Http_TypedConfig{TypedConfig: zipkinTracingProvider},
+		}
+	}
+
 	return &hcm.HttpConnectionManager{
 		CodecType:   hcm.HttpConnectionManager_AUTO,
 		StatPrefix:  "ingress_http",
-		HttpFilters: filterBuilder.Filters(),
+		HttpFilters: filter,
 		UpgradeConfigs: []*hcm.HttpConnectionManager_UpgradeConfig{
 			{
 				UpgradeType: "websocket",
@@ -250,15 +303,18 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 				VirtualHosts: virtualHosts,
 			},
 		},
-		Tracing:               &hcm.HttpConnectionManager_Tracing{},
+		Tracing:               tracingConfig,
 		AccessLog:             accessLoggers,
 		UseRemoteAddress:      &wrapperspb.BoolValue{Value: c.useRemoteAddress},
 		StripMatchingHostPort: true,
-	}
+	}, nil
 }
 
-func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtualHosts []*route.VirtualHost) (listener.FilterChain, error) {
-	httpConnectionManager := c.makeConnectionManager(virtualHosts)
+func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtualHosts []*route.VirtualHost, accessLog string) (listener.FilterChain, error) {
+	httpConnectionManager, err := c.makeConnectionManager(virtualHosts, accessLog)
+	if err != nil {
+		return listener.FilterChain{}, fmt.Errorf("failed to get httpConnectionManager: %s", err)
+	}
 	anyHttpConfig, err := anypb.New(httpConnectionManager)
 	if err != nil {
 		return listener.FilterChain{}, fmt.Errorf("failed to marshal HTTP config struct to typed struct: %s", err)
@@ -316,11 +372,10 @@ func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtua
 	}, nil
 }
 
-func makeListener(filterChains []*listener.FilterChain, envoyListenerIpv4Address []string, envoyListenPort uint32) *listener.Listener {
-	// TODO make typedConfigs static
+func makeListener(filterChains []*listener.FilterChain, envoyListenerIpv4Address []string, envoyListenPort uint32) (*listener.Listener, error) {
 	tlsInspectorConfig, err := anypb.New(&tls_inspector.TlsInspector{})
 	if err != nil {
-		log.Fatalf("failed to marshal tls_inspector config struct to typed struct: %s", err)
+		return &listener.Listener{}, fmt.Errorf("failed to marshal tls_inspector config struct to typed struct: %s", err)
 	}
 
 	additional_addresses := make([]*listener.AdditionalAddress, len(envoyListenerIpv4Address)-1)
@@ -368,7 +423,7 @@ func makeListener(filterChains []*listener.FilterChain, envoyListenerIpv4Address
 		TrafficDirection: core.TrafficDirection_OUTBOUND,
 	}
 
-	return &listener
+	return &listener, nil
 }
 
 func makeAddresses(addresses []LBHost, upstreamPort uint32) []*core.Address {

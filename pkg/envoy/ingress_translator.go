@@ -65,6 +65,7 @@ func VirtualHostsEquals(a, b []*virtualHost) bool {
 type envoyConfiguration struct {
 	VirtualHosts []*virtualHost
 	Clusters     []*cluster
+	AccessLog    string
 }
 
 type virtualHost struct {
@@ -246,8 +247,16 @@ func (ing *envoyIngress) addHealthCheckPath(path string) {
 	ing.cluster.HealthCheckPath = path
 }
 
+func (ing *envoyIngress) removeHealthCheckPath() {
+	ing.cluster.HealthCheckPath = ""
+}
+
 func (ing *envoyIngress) addHealthCheckHost(host string) {
 	ing.cluster.HealthCheckHost = host
+}
+
+func (ing *envoyIngress) removeHealthCheckHost() {
+	ing.cluster.HealthCheckHost = ""
 }
 
 func (ing *envoyIngress) addTimeout(timeout time.Duration) {
@@ -365,7 +374,7 @@ func validateSubdomain(ruleHost, host string) bool {
 	return strings.HasSuffix(host, ruleHost)
 }
 
-func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v1.Secret, timeouts DefaultTimeouts) *envoyConfiguration {
+func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v1.Secret, timeouts DefaultTimeouts, accessLog string) *envoyConfiguration {
 	cfg := &envoyConfiguration{}
 	envoyIngresses := map[string]*envoyIngress{}
 	ruleHostToIngresses := map[string][]*k8s.Ingress{}
@@ -397,7 +406,7 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 		// Add upstreams based on maintenance status
 		for _, ingress := range ingressList {
 			for _, j := range ingress.Upstreams {
-				// Skip this upstream if cluster is in maintenance but keep it if no other cluster can serve it 
+				// Skip this upstream if cluster is in maintenance but keep it if no other cluster can serve it
 				if !hasNonMaintenance || !ingress.Maintenance {
 					// Check if the upstream is already added
 					exists := false
@@ -501,6 +510,7 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 	for _, ingress := range envoyIngresses {
 		cfg.Clusters = append(cfg.Clusters, ingress.cluster)
 		cfg.VirtualHosts = append(cfg.VirtualHosts, ingress.vhost)
+		cfg.AccessLog = accessLog
 	}
 
 	numVhosts.Set(float64(len(cfg.VirtualHosts)))

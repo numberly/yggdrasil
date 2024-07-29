@@ -3,6 +3,7 @@ package envoy
 import (
 	"errors"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -11,7 +12,6 @@ import (
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	tcache "github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cache "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
-	util "github.com/envoyproxy/go-control-plane/pkg/conversion"
 	"github.com/sirupsen/logrus"
 	"github.com/uswitch/yggdrasil/pkg/k8s"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -42,15 +42,20 @@ type HttpExtAuthz struct {
 	Timeout             time.Duration `json:"timeout"`
 	MaxRequestBytes     uint32        `json:"maxRequestBytes"`
 	AllowPartialMessage bool          `json:"allowPartialMessage"`
+	PackAsBytes         bool          `json:"packAsBytes"`
 	FailureModeAllow    bool          `json:"FailureModeAllow"`
 }
 
 type HttpGrpcLogger struct {
-	Name                      string        `json:"name"`
-	Cluster                   string        `json:"cluster"`
-	Timeout                   time.Duration `json:"timeout"`
-	AdditionalRequestHeaders  []string      `json:"additionalRequestHeaders"`
-	AdditionalResponseHeaders []string      `json:"additionalResponseHeaders"`
+	Name            string        `json:"name"`
+	Cluster         string        `json:"cluster"`
+	Timeout         time.Duration `json:"timeout"`
+	RequestHeaders  []string      `json:"requestHeaders"`
+	ResponseHeaders []string      `json:"responseHeaders"`
+}
+
+type AccessLogger struct {
+	Format map[string]interface{} `json:"format"`
 }
 
 // KubernetesConfigurator takes a given Ingress Class and lister to find only ingresses of that class
@@ -58,6 +63,7 @@ type KubernetesConfigurator struct {
 	ingressClasses             []string
 	nodeID                     string
 	syncSecrets                bool
+	accessLog                  string
 	certificates               []Certificate
 	trustCA                    string
 	upstreamPort               uint32
@@ -70,7 +76,9 @@ type KubernetesConfigurator struct {
 	httpExtAuthz               HttpExtAuthz
 	httpGrpcLogger             HttpGrpcLogger
 	defaultTimeouts            DefaultTimeouts
+	accessLogger               AccessLogger
 	defaultRetryOn             string
+	tracingProvider            string
 	alpnProtocols              []string
 
 	previousConfig  *envoyConfiguration
@@ -80,26 +88,48 @@ type KubernetesConfigurator struct {
 }
 
 // NewKubernetesConfigurator returns a Kubernetes configurator given a lister and ingress class
-func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca string, ingressClasses []string, options ...option) *KubernetesConfigurator {
-	c := &KubernetesConfigurator{ingressClasses: ingressClasses, nodeID: nodeID, certificates: certificates, trustCA: ca}
+func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca string, ingressClasses []string, accessLog string, options ...option) *KubernetesConfigurator {
+	c := &KubernetesConfigurator{ingressClasses: ingressClasses, nodeID: nodeID, certificates: certificates, trustCA: ca, accessLog: accessLog}
 	for _, opt := range options {
 		opt(c)
 	}
 	return c
 }
 
+func (c *KubernetesConfigurator) ValidateAndFormatPath() {
+	if c.accessLog == "" {
+		logrus.Fatal("accessLog path cannot be empty")
+	}
+
+	// Clean the path and make it absolute
+	c.accessLog = filepath.Clean(c.accessLog)
+	absolutePath, err := filepath.Abs(c.accessLog)
+	if err != nil {
+		logrus.Fatalf("invalid path: %v", err)
+	}
+	c.accessLog = absolutePath
+
+	// Ensure the path ends with a directory separator if it's a directory
+	if strings.HasSuffix(c.accessLog, string(filepath.Separator)) {
+		c.accessLog = string(filepath.Separator)
+	}
+}
+
 // Generate creates a new snapshot
-func (c *KubernetesConfigurator) Generate(ingresses []*k8s.Ingress, secrets []*v1.Secret) cache.Snapshot {
+func (c *KubernetesConfigurator) Generate(ingresses []*k8s.Ingress, secrets []*v1.Secret) (cache.Snapshot, error) {
 	c.Lock()
 	defer c.Unlock()
 
 	validIngresses := validIngressFilter(classFilter(ingresses, c.ingressClasses))
-	config := translateIngresses(validIngresses, c.syncSecrets, secrets, c.defaultTimeouts)
+	config := translateIngresses(validIngresses, c.syncSecrets, secrets, c.defaultTimeouts, c.accessLog)
 
 	vmatch, cmatch := config.equals(c.previousConfig)
 
 	clusters := c.generateClusters(config)
-	listeners := c.generateListeners(config)
+	listeners, err := c.generateListeners(config)
+	if err != nil {
+		return cache.Snapshot{}, err
+	}
 
 	if !vmatch {
 		c.listenerVersion = time.Now().String()
@@ -115,7 +145,7 @@ func (c *KubernetesConfigurator) Generate(ingresses []*k8s.Ingress, secrets []*v
 	snap := cache.Snapshot{}
 	snap.Resources[tcache.Cluster] = cache.NewResources(c.clusterVersion, []tcache.Resource(clusters))
 	snap.Resources[tcache.Listener] = cache.NewResources(c.listenerVersion, []tcache.Resource(listeners))
-	return snap
+	return snap, nil
 }
 
 // NodeID returns the NodeID
@@ -161,25 +191,33 @@ func (c *KubernetesConfigurator) matchCertificateIndices(virtualHost *virtualHos
 	return []int{}, errNoCertificateMatch
 }
 
-func (c *KubernetesConfigurator) generateListeners(config *envoyConfiguration) []tcache.Resource {
+func (c *KubernetesConfigurator) generateListeners(config *envoyConfiguration) ([]tcache.Resource, error) {
 	var filterChains []*listener.FilterChain
+	var err error
 	if c.syncSecrets {
-		filterChains = c.generateDynamicTLSFilterChains(config)
+		filterChains, err = c.generateDynamicTLSFilterChains(config)
 	} else if len(c.certificates) > 0 {
-		filterChains = c.generateTLSFilterChains(config)
+		filterChains, err = c.generateTLSFilterChains(config)
 	} else {
-		filterChains = c.generateHTTPFilterChain(config)
+		filterChains, err = c.generateHTTPFilterChain(config)
 	}
-	return []tcache.Resource{makeListener(filterChains, c.envoyListenerIpv4Address, c.envoyListenPort)}
+	if err != nil {
+		return []tcache.Resource{}, err
+	}
+	listener, err := makeListener(filterChains, c.envoyListenerIpv4Address, c.envoyListenPort)
+	return []tcache.Resource{listener}, err
 }
 
-func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyConfiguration) []*listener.FilterChain {
+func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyConfiguration) ([]*listener.FilterChain, error) {
 	filterChains := []*listener.FilterChain{}
 
 	allVhosts := []*route.VirtualHost{}
 
 	for _, virtualHost := range config.VirtualHosts {
-		envoyVhost := makeVirtualHost(virtualHost, c.hostSelectionRetryAttempts, c.defaultRetryOn)
+		envoyVhost, err := makeVirtualHost(virtualHost, c.hostSelectionRetryAttempts, c.defaultRetryOn)
+		if err != nil {
+			return nil, err
+		}
 		allVhosts = append(allVhosts, envoyVhost)
 
 		if virtualHost.TlsCert == "" || virtualHost.TlsKey == "" {
@@ -195,7 +233,7 @@ func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyCon
 			Cert:  virtualHost.TlsCert,
 			Key:   virtualHost.TlsKey,
 		}
-		filterChain, err := c.makeFilterChain(certificate, []*route.VirtualHost{envoyVhost})
+		filterChain, err := c.makeFilterChain(certificate, []*route.VirtualHost{envoyVhost}, config.AccessLog)
 		if err != nil {
 			logrus.Warnf("error making filter chain: %v", err)
 		}
@@ -208,28 +246,31 @@ func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyCon
 			Cert:  c.certificates[0].Cert,
 			Key:   c.certificates[0].Key,
 		}
-		if defaultFC, err := c.makeFilterChain(defaultCert, allVhosts); err != nil {
+		if defaultFC, err := c.makeFilterChain(defaultCert, allVhosts, config.AccessLog); err != nil {
 			logrus.Warnf("error making default filter chain: %v", err)
 		} else {
 			filterChains = append(filterChains, &defaultFC)
 		}
 	}
 
-	return filterChains
+	return filterChains, nil
 }
 
-func (c *KubernetesConfigurator) generateHTTPFilterChain(config *envoyConfiguration) []*listener.FilterChain {
+func (c *KubernetesConfigurator) generateHTTPFilterChain(config *envoyConfiguration) ([]*listener.FilterChain, error) {
 	virtualHosts := []*route.VirtualHost{}
 	for _, virtualHost := range config.VirtualHosts {
-		virtualHosts = append(virtualHosts, makeVirtualHost(virtualHost, c.hostSelectionRetryAttempts, c.defaultRetryOn))
+		vhost, err := makeVirtualHost(virtualHost, c.hostSelectionRetryAttempts, c.defaultRetryOn)
+		if err != nil {
+			return nil, err
+		}
+		virtualHosts = append(virtualHosts, vhost)
 	}
 
-	httpConnectionManager := c.makeConnectionManager(virtualHosts)
-	httpConfig, err := util.MessageToStruct(httpConnectionManager)
+	httpConnectionManager, err := c.makeConnectionManager(virtualHosts, config.AccessLog)
 	if err != nil {
-		log.Fatalf("failed to convert virtualHost to envoy control plane struct: %s", err)
+		return nil, err
 	}
-	anyHttpConfig, err := anypb.New(httpConfig)
+	anyHttpConfig, err := anypb.New(httpConnectionManager)
 	if err != nil {
 		log.Fatalf("failed to marshal HTTP config struct to typed struct: %s", err)
 	}
@@ -242,10 +283,10 @@ func (c *KubernetesConfigurator) generateHTTPFilterChain(config *envoyConfigurat
 				},
 			},
 		},
-	}
+	}, nil
 }
 
-func (c *KubernetesConfigurator) generateTLSFilterChains(config *envoyConfiguration) []*listener.FilterChain {
+func (c *KubernetesConfigurator) generateTLSFilterChains(config *envoyConfiguration) ([]*listener.FilterChain, error) {
 	virtualHostsForCertificates := make([][]*route.VirtualHost, len(c.certificates))
 
 	for _, virtualHost := range config.VirtualHosts {
@@ -254,7 +295,11 @@ func (c *KubernetesConfigurator) generateTLSFilterChains(config *envoyConfigurat
 			log.Printf("error matching certificate for '%s': %v", virtualHost.Host, err)
 		} else {
 			for _, idx := range certificateIndicies {
-				virtualHostsForCertificates[idx] = append(virtualHostsForCertificates[idx], makeVirtualHost(virtualHost, c.hostSelectionRetryAttempts, c.defaultRetryOn))
+				vhost, err := makeVirtualHost(virtualHost, c.hostSelectionRetryAttempts, c.defaultRetryOn)
+				if err != nil {
+					return nil, err
+				}
+				virtualHostsForCertificates[idx] = append(virtualHostsForCertificates[idx], vhost)
 			}
 		}
 	}
@@ -267,14 +312,14 @@ func (c *KubernetesConfigurator) generateTLSFilterChains(config *envoyConfigurat
 			continue
 		}
 
-		filterChain, err := c.makeFilterChain(certificate, virtualHosts)
+		filterChain, err := c.makeFilterChain(certificate, virtualHosts, config.AccessLog)
 		if err != nil {
 			log.Printf("error making filter chain: %v", err)
 		}
 
 		filterChains = append(filterChains, &filterChain)
 	}
-	return filterChains
+	return filterChains, nil
 }
 
 func (c *KubernetesConfigurator) generateClusters(config *envoyConfiguration) []tcache.Resource {

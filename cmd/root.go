@@ -36,6 +36,7 @@ type config struct {
 	NodeName                   string                    `json:"nodeName"`
 	Clusters                   []clusterConfig           `json:"clusters"`
 	SyncSecrets                bool                      `json:"syncSecrets"`
+	AccessLog                  string                    `json:"accessLog"`
 	Certificates               []envoy.Certificate       `json:"certificates"`
 	TrustCA                    string                    `json:"trustCA"`
 	UpstreamPort               uint32                    `json:"upstreamPort"`
@@ -49,6 +50,7 @@ type config struct {
 	HttpGrpcLogger             envoy.HttpGrpcLogger      `json:"httpGrpcLogger"`
 	DefaultTimeouts            envoy.DefaultTimeouts     `json:"defaultTimeouts"`
 	AlpnProtocols              []string                  `json:"alpnProtocols"`
+	AccessLogger               envoy.AccessLogger        `json:"accessLogger"`
 }
 
 // Hasher returns node ID as an ID
@@ -80,18 +82,21 @@ func init() {
 	rootCmd.PersistentFlags().String("address", "0.0.0.0:8080", "yggdrasil envoy control plane listen address")
 	rootCmd.PersistentFlags().String("health-address", "0.0.0.0:8081", "yggdrasil health API listen address")
 	rootCmd.PersistentFlags().String("node-name", "", "envoy node name")
+	rootCmd.PersistentFlags().String("access-log", "/var/log/envoy/", "envoy default access log file")
 	rootCmd.PersistentFlags().String("cert", "", "certfile")
 	rootCmd.PersistentFlags().String("key", "", "keyfile")
 	rootCmd.PersistentFlags().String("ca", "", "trustedCA")
 	rootCmd.PersistentFlags().StringSlice("ingress-classes", nil, "Ingress classes to watch")
 	rootCmd.PersistentFlags().StringArrayVar(&kubeConfig, "kube-config", nil, "Path to kube config")
 	rootCmd.PersistentFlags().Bool("debug", false, "Log at debug level")
+	rootCmd.PersistentFlags().Bool("config-dump", false, "Enable config dump endpoint at /configdump on the health-address HTTP server")
 	rootCmd.PersistentFlags().Uint32("upstream-port", 443, "port used to connect to the upstream ingresses")
 	rootCmd.PersistentFlags().StringSlice("envoy-listener-ipv4-address", []string{"0.0.0.0"}, "IPv4 address by the envoy proxy to accept incoming connections")
 	rootCmd.PersistentFlags().Uint32("envoy-port", 10000, "port by the envoy proxy to accept incoming connections")
 	rootCmd.PersistentFlags().Int32("max-ejection-percentage", -1, "maximal percentage of hosts ejected via outlier detection. Set to >=0 to activate outlier detection in envoy.")
 	rootCmd.PersistentFlags().Int64("host-selection-retry-attempts", -1, "Number of host selection retry attempts. Set to value >=0 to enable")
 	rootCmd.PersistentFlags().String("retry-on", "5xx", "default comma-separated list of retry policies")
+	rootCmd.PersistentFlags().String("tracing-provider", "", "HTTP Connection Manager tracing provider block to include")
 	rootCmd.PersistentFlags().Duration("upstream-healthcheck-interval", 10*time.Second, "duration of the upstream health check interval")
 	rootCmd.PersistentFlags().Duration("upstream-healthcheck-timeout", 5*time.Second, "timeout of the upstream healthchecks")
 	rootCmd.PersistentFlags().Uint32("upstream-healthcheck-healthy", 3, "number of successful healthchecks before the backend is considered healthy")
@@ -106,15 +111,19 @@ func init() {
 	rootCmd.PersistentFlags().Duration("http-ext-authz-timeout", 200*time.Millisecond, "The timeout for the gRPC request. This is the timeout for a specific request.")
 	rootCmd.PersistentFlags().Uint32("http-ext-authz-max-request-bytes", 8192, "Sets the maximum size of a message body that the filter will hold in memory")
 	rootCmd.PersistentFlags().Bool("http-ext-authz-allow-partial-message", true, "When this field is true, Envoy will buffer the message until max_request_bytes is reached")
+	rootCmd.PersistentFlags().Bool("http-ext-authz-pack-as-bytes", false, "When this field is true, Envoy will send the body as raw bytes.")
 	rootCmd.PersistentFlags().Bool("http-ext-authz-failure-mode-allow", true, "Changes filters behaviour on errors")
+
 	rootCmd.PersistentFlags().Duration("default-route-timeout", 15*time.Second, "Default timeout of the routes")
 	rootCmd.PersistentFlags().Duration("default-cluster-timeout", 30*time.Second, "Default timeout of the cluster")
 	rootCmd.PersistentFlags().Duration("default-per-try-timeout", 5*time.Second, "Default timeout of PerTry")
 	rootCmd.PersistentFlags().StringSlice("alpn-protocols", []string{}, "exposed listener ALPN protocols")
 	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
+	viper.BindPFlag("configDump", rootCmd.PersistentFlags().Lookup("config-dump"))
 	viper.BindPFlag("address", rootCmd.PersistentFlags().Lookup("address"))
 	viper.BindPFlag("healthAddress", rootCmd.PersistentFlags().Lookup("health-address"))
 	viper.BindPFlag("nodeName", rootCmd.PersistentFlags().Lookup("node-name"))
+	viper.BindPFlag("accessLog", rootCmd.PersistentFlags().Lookup("access-log"))
 	viper.BindPFlag("ingressClasses", rootCmd.PersistentFlags().Lookup("ingress-classes"))
 	viper.BindPFlag("cert", rootCmd.PersistentFlags().Lookup("cert"))
 	viper.BindPFlag("key", rootCmd.PersistentFlags().Lookup("key"))
@@ -125,6 +134,7 @@ func init() {
 	viper.BindPFlag("maxEjectionPercentage", rootCmd.PersistentFlags().Lookup("max-ejection-percentage"))
 	viper.BindPFlag("hostSelectionRetryAttempts", rootCmd.PersistentFlags().Lookup("host-selection-retry-attempts"))
 	viper.BindPFlag("retryOn", rootCmd.PersistentFlags().Lookup("retry-on"))
+	viper.BindPFlag("tracingProvider", rootCmd.PersistentFlags().Lookup("tracing-provider"))
 	viper.BindPFlag("upstreamHealthCheck.interval", rootCmd.PersistentFlags().Lookup("upstream-healthcheck-interval"))
 	viper.BindPFlag("upstreamHealthCheck.timeout", rootCmd.PersistentFlags().Lookup("upstream-healthcheck-timeout"))
 	viper.BindPFlag("upstreamHealthCheck.healthyThreshold", rootCmd.PersistentFlags().Lookup("upstream-healthcheck-healthy"))
@@ -139,6 +149,7 @@ func init() {
 	viper.BindPFlag("httpExtAuthz.timeout", rootCmd.PersistentFlags().Lookup("http-ext-authz-timeout"))
 	viper.BindPFlag("httpExtAuthz.maxRequestBytes", rootCmd.PersistentFlags().Lookup("http-ext-authz-max-request-bytes"))
 	viper.BindPFlag("httpExtAuthz.allowPartialMessage", rootCmd.PersistentFlags().Lookup("http-ext-authz-allow-partial-message"))
+	viper.BindPFlag("httpExtAuthz.packAsBytes", rootCmd.PersistentFlags().Lookup("http-ext-authz-pack-as-bytes"))
 	viper.BindPFlag("httpExtAuthz.FailureModeAllow", rootCmd.PersistentFlags().Lookup("http-ext-authz-failure-mode-allow"))
 	viper.BindPFlag("defaultTimeouts.Route", rootCmd.PersistentFlags().Lookup("default-route-timeout"))
 	viper.BindPFlag("defaultTimeouts.Cluster", rootCmd.PersistentFlags().Lookup("default-cluster-timeout"))
@@ -234,6 +245,7 @@ func main(*cobra.Command, []string) error {
 		c.Certificates,
 		viper.GetString("trustCA"),
 		viper.GetStringSlice("ingressClasses"),
+		viper.GetString("accessLog"),
 		envoy.WithUpstreamPort(uint32(viper.GetInt32("upstreamPort"))),
 		envoy.WithEnvoyListenerIpv4Address(viper.GetStringSlice("envoyListenerIpv4Address")),
 		envoy.WithEnvoyPort(uint32(viper.GetInt32("envoyPort"))),
@@ -246,15 +258,18 @@ func main(*cobra.Command, []string) error {
 		envoy.WithSyncSecrets(c.SyncSecrets),
 		envoy.WithDefaultTimeouts(c.DefaultTimeouts),
 		envoy.WithDefaultRetryOn(viper.GetString("retryOn")),
+		envoy.WithAccessLog(c.AccessLogger),
+		envoy.WithTracingProvider(viper.GetString("tracingProvider")),
 		envoy.WithAlpnProtocols(viper.GetStringSlice("alpnProtocols")),
 	)
+	configurator.ValidateAndFormatPath()
 	snapshotter := envoy.NewSnapshotter(envoyCache, configurator, aggregator)
 
 	go snapshotter.Run(aggregator)
 	go aggregator.Run()
 
 	envoyServer := server.NewServer(ctx, envoyCache, &callbacks{})
-	go runEnvoyServer(envoyServer, viper.GetString("address"), viper.GetString("healthAddress"), ctx.Done())
+	go runEnvoyServer(envoyServer, snapshotter, viper.GetBool("configDump"), viper.GetString("address"), viper.GetString("healthAddress"), ctx.Done())
 
 	<-stopCh
 	return nil

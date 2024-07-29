@@ -86,6 +86,20 @@ func WithDefaultRetryOn(defaultRetryOn string) option {
 	}
 }
 
+// WithAccessLog configures the access log formats
+func WithAccessLog(accessLogger AccessLogger) option {
+	return func(c *KubernetesConfigurator) {
+		c.accessLogger = accessLogger
+	}
+}
+
+// WithTracingProvider configures the tracing provider for HTTP connection manager
+func WithTracingProvider(tracingProvider string) option {
+	return func(c *KubernetesConfigurator) {
+		c.tracingProvider = tracingProvider
+	}
+}
+
 // WithAlpnProtocols configures the the exposed listener ALPN protocols
 func WithAlpnProtocols(alpnProtocols []string) option {
 	return func(c *KubernetesConfigurator) {

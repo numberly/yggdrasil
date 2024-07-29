@@ -209,8 +209,8 @@ func TestEquals(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{}, timeouts)
-	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{}, timeouts)
+	c := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c.equals(c2)
 	if vmatch != true {
@@ -231,8 +231,8 @@ func TestNotEquals(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress, ingress3, ingress2}, false, []*v1.Secret{}, timeouts)
-	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2, ingress4}, false, []*v1.Secret{}, timeouts)
+	c := translateIngresses([]*k8s.Ingress{ingress, ingress3, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2, ingress4}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c.equals(c2)
 	if vmatch == true {
@@ -252,8 +252,8 @@ func TestPartialEquals(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress2}, false, []*v1.Secret{}, timeouts)
-	c2 := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts)
+	c := translateIngresses([]*k8s.Ingress{ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c2.equals(c)
 	if vmatch != true {
@@ -272,7 +272,7 @@ func TestGeneratesForSingleIngress(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts)
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Error("expected 1 virtual host")
@@ -293,7 +293,7 @@ func TestGeneratesForSingleIngress(t *testing.T) {
 	}
 
 	if c.Clusters[0].Hosts[0].Weight != 1 {
-		t.Errorf("expected cluster host's weight for 1, was %v", c.Clusters[0].Hosts[0].Weight)
+		t.Errorf("expected cluster host's weight for 1, was %d", c.Clusters[0].Hosts[0].Weight)
 	}
 
 	if c.VirtualHosts[0].UpstreamCluster != c.Clusters[0].Name {
@@ -313,7 +313,7 @@ func TestGeneratesForMultipleIngressSharingSpecHost(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{fooIngress, barIngress}, false, []*v1.Secret{}, timeouts)
+	c := translateIngresses([]*k8s.Ingress{fooIngress, barIngress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Error("expected 1 virtual host")
@@ -334,10 +334,10 @@ func TestGeneratesForMultipleIngressSharingSpecHost(t *testing.T) {
 		t.Errorf("expected 2 host, was %d", len(c.Clusters[0].Hosts))
 	}
 	if c.Clusters[0].Hosts[0].Host != "foo.com" {
-		t.Errorf("expected cluster host for foo.com, was %s", c.Clusters[0].Hosts[0].Host)
+		t.Errorf("expected cluster host for foo.com, was %v", c.Clusters[0].Hosts[0].Host)
 	}
 	if c.Clusters[0].Hosts[1].Host != "bar.com" {
-		t.Errorf("expected cluster host for bar.com, was %s", c.Clusters[0].Hosts[1].Host)
+		t.Errorf("expected cluster host for bar.com, was %v", c.Clusters[0].Hosts[1].Host)
 	}
 
 	if c.VirtualHosts[0].UpstreamCluster != c.Clusters[0].Name {
@@ -373,9 +373,9 @@ func TestIngressWithIP(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts)
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 	if c.Clusters[0].Hosts[0].Host != "127.0.0.1" {
-		t.Errorf("expected cluster host to be IP address, was %s", c.Clusters[0].Hosts[0].Host)
+		t.Errorf("expected cluster host to be IP address, was %v", c.Clusters[0].Hosts[0].Host)
 	}
 }
 

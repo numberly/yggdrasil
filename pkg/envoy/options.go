@@ -2,10 +2,10 @@ package envoy
 
 type option func(c *KubernetesConfigurator)
 
-// WithEWithEnvoyListenerIpv4AddressnvoyPort configures envoy IPv4 listen address into a KubernetesConfigurator
-func WithEnvoyListenerIpv4Address(address string) option {
+// WithEnvoyListenerIpv4Address configures envoy IPv4 listen address into a KubernetesConfigurator
+func WithEnvoyListenerIpv4Address(addresses []string) option {
 	return func(c *KubernetesConfigurator) {
-		c.envoyListenerIpv4Address = address
+		c.envoyListenerIpv4Address = addresses
 	}
 }
 
@@ -72,6 +72,13 @@ func WithSyncSecrets(syncSecrets bool) option {
 	}
 }
 
+// WithDefaultTimeouts configures the default timeouts
+func WithDefaultTimeouts(defaultTimeouts DefaultTimeouts) option {
+	return func(c *KubernetesConfigurator) {
+		c.defaultTimeouts = defaultTimeouts
+	}
+}
+
 // WithDefaultRetryOn configures the default retry policy
 func WithDefaultRetryOn(defaultRetryOn string) option {
 	return func(c *KubernetesConfigurator) {
@@ -90,5 +97,12 @@ func WithAccessLog(accessLogger AccessLogger) option {
 func WithTracingProvider(tracingProvider string) option {
 	return func(c *KubernetesConfigurator) {
 		c.tracingProvider = tracingProvider
+	}
+}
+
+// WithAlpnProtocols configures the the exposed listener ALPN protocols
+func WithAlpnProtocols(alpnProtocols []string) option {
+	return func(c *KubernetesConfigurator) {
+		c.alpnProtocols = alpnProtocols
 	}
 }

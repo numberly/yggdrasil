@@ -131,8 +131,8 @@ func TestVirtualHostEquality(t *testing.T) {
 }
 
 func TestClusterEquality(t *testing.T) {
-	a := &cluster{Name: "foo", Hosts: []string{"host1", "host2"}}
-	b := &cluster{Name: "foo", Hosts: []string{"host1", "host2"}}
+	a := &cluster{Name: "foo", Hosts: []LBHost{{"host1", 1}, {"host2", 1}}}
+	b := &cluster{Name: "foo", Hosts: []LBHost{{"host1", 1}, {"host2", 1}}}
 
 	if !a.Equals(b) {
 		t.Error()
@@ -142,17 +142,17 @@ func TestClusterEquality(t *testing.T) {
 		t.Error("cluster is equals nil, expect not to be equal")
 	}
 
-	c := &cluster{Name: "bar", Hosts: []string{"host1", "host2"}}
+	c := &cluster{Name: "bar", Hosts: []LBHost{{"host1", 1}, {"host2", 1}}}
 	if a.Equals(c) {
 		t.Error("clusters have different names, expected not to be equal")
 	}
 
-	d := &cluster{Name: "foo", Hosts: []string{"host1"}} // missing host2
+	d := &cluster{Name: "foo", Hosts: []LBHost{{"host1", 1}}} // missing host2
 	if a.Equals(d) {
 		t.Error("clusters have different hosts, should be different")
 	}
 
-	e := &cluster{Name: "foo", Hosts: []string{"bad1", "bad2"}}
+	e := &cluster{Name: "foo", Hosts: []LBHost{{"bad1", 1}, {"bad2", 1}}}
 	if a.Equals(e) {
 		t.Error("cluster hosts are different, shouldn't be equal")
 	}
@@ -162,7 +162,7 @@ func TestClusterEquality(t *testing.T) {
 		t.Error("no hosts set")
 	}
 
-	g := &cluster{Name: "foo", Hosts: []string{"host1", "host2"}, Timeout: (5 * time.Second)}
+	g := &cluster{Name: "foo", Hosts: []LBHost{{"host1", 1}, {"host2", 1}}, Timeout: (5 * time.Second)}
 	if a.Equals(g) {
 		t.Error("clusters with different timeout values should not be equal")
 	}
@@ -204,8 +204,13 @@ func TestEqualityVirtualHosts(t *testing.T) {
 func TestEquals(t *testing.T) {
 	ingress := newGenericIngress("foo.app.com", "foo.cluster.com")
 	ingress2 := newGenericIngress("bar.app.com", "foo.bar.com")
-	c := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{})
-	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c.equals(c2)
 	if vmatch != true {
@@ -221,8 +226,13 @@ func TestNotEquals(t *testing.T) {
 	ingress2 := newGenericIngress("foo.app.com", "bar.cluster.com")
 	ingress3 := newGenericIngress("foo.baz.com", "bar.cluster.com")
 	ingress4 := newGenericIngress("foo.howdy.com", "bar.cluster.com")
-	c := translateIngresses([]*k8s.Ingress{ingress, ingress3, ingress2}, false, []*v1.Secret{})
-	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2, ingress4}, false, []*v1.Secret{})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress, ingress3, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2, ingress4}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c.equals(c2)
 	if vmatch == true {
@@ -237,8 +247,13 @@ func TestNotEquals(t *testing.T) {
 func TestPartialEquals(t *testing.T) {
 	ingress := newGenericIngress("foo.app.com", "bar.cluster.com")
 	ingress2 := newGenericIngress("foo.app.com", "foo.cluster.com")
-	c := translateIngresses([]*k8s.Ingress{ingress2}, false, []*v1.Secret{})
-	c2 := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c2.equals(c)
 	if vmatch != true {
@@ -252,7 +267,12 @@ func TestPartialEquals(t *testing.T) {
 
 func TestGeneratesForSingleIngress(t *testing.T) {
 	ingress := newGenericIngress("foo.app.com", "foo.cluster.com")
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Error("expected 1 virtual host")
@@ -268,8 +288,12 @@ func TestGeneratesForSingleIngress(t *testing.T) {
 	if c.Clusters[0].Name != "foo_app_com" {
 		t.Errorf("expected cluster to be named after ingress host, was %s", c.Clusters[0].Name)
 	}
-	if c.Clusters[0].Hosts[0] != "foo.cluster.com" {
-		t.Errorf("expected cluster host for foo.cluster.com, was %s", c.Clusters[0].Hosts[0])
+	if c.Clusters[0].Hosts[0].Host != "foo.cluster.com" {
+		t.Errorf("expected cluster host for foo.cluster.com, was %s", c.Clusters[0].Hosts[0].Host)
+	}
+
+	if c.Clusters[0].Hosts[0].Weight != 1 {
+		t.Errorf("expected cluster host's weight for 1, was %d", c.Clusters[0].Hosts[0].Weight)
 	}
 
 	if c.VirtualHosts[0].UpstreamCluster != c.Clusters[0].Name {
@@ -284,7 +308,12 @@ func TestGeneratesForSingleIngress(t *testing.T) {
 func TestGeneratesForMultipleIngressSharingSpecHost(t *testing.T) {
 	fooIngress := newGenericIngress("app.com", "foo.com")
 	barIngress := newGenericIngress("app.com", "bar.com")
-	c := translateIngresses([]*k8s.Ingress{fooIngress, barIngress}, false, []*v1.Secret{})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{fooIngress, barIngress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Error("expected 1 virtual host")
@@ -304,11 +333,11 @@ func TestGeneratesForMultipleIngressSharingSpecHost(t *testing.T) {
 	if len(c.Clusters[0].Hosts) != 2 {
 		t.Errorf("expected 2 host, was %d", len(c.Clusters[0].Hosts))
 	}
-	if c.Clusters[0].Hosts[0] != "foo.com" {
-		t.Errorf("expected cluster host for foo.com, was %s", c.Clusters[0].Hosts[0])
+	if c.Clusters[0].Hosts[0].Host != "foo.com" {
+		t.Errorf("expected cluster host for foo.com, was %v", c.Clusters[0].Hosts[0].Host)
 	}
-	if c.Clusters[0].Hosts[1] != "bar.com" {
-		t.Errorf("expected cluster host for bar.com, was %s", c.Clusters[0].Hosts[1])
+	if c.Clusters[0].Hosts[1].Host != "bar.com" {
+		t.Errorf("expected cluster host for bar.com, was %v", c.Clusters[0].Hosts[1].Host)
 	}
 
 	if c.VirtualHosts[0].UpstreamCluster != c.Clusters[0].Name {
@@ -339,9 +368,14 @@ func TestFilterNonMatchingIngresses(t *testing.T) {
 
 func TestIngressWithIP(t *testing.T) {
 	ingress := newIngressIP("app.com", "127.0.0.1")
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{})
-	if c.Clusters[0].Hosts[0] != "127.0.0.1" {
-		t.Errorf("expected cluster host to be IP address, was %s", c.Clusters[0].Hosts[0])
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	if c.Clusters[0].Hosts[0].Host != "127.0.0.1" {
+		t.Errorf("expected cluster host to be IP address, was %v", c.Clusters[0].Hosts[0].Host)
 	}
 }
 

@@ -75,20 +75,36 @@ Yggdrasil allows for some customisation of the route and cluster config per Ingr
 | Name                                                         | type     |
 |--------------------------------------------------------------|----------|
 | [yggdrasil.uswitch.com/healthcheck-path](#health-check-path) | string   |
-| [yggdrasil.uswitch.com/timeout](#timeout)                    | duration |
+| [yggdrasil.uswitch.com/healthcheck-host](#health-check-host) | string   |
+| [yggdrasil.uswitch.com/timeout](#timeouts)                   | duration |
+| [yggdrasil.uswitch.com/cluster-timeout](#timeouts)           | duration |
+| [yggdrasil.uswitch.com/route-timeout](#timeouts)             | duration |
+| [yggdrasil.uswitch.com/per-try-timeout](#timeouts)           | duration |
+| [yggdrasil.uswitch.com/weight](#weight)                      | uint32   |
 | [yggdrasil.uswitch.com/retry-on](#retries)                   | string   |
 
 ### Health Check Path
 Specifies a path to configure a [HTTP health check](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/core/v3/health_check.proto#config-core-v3-healthcheck-httphealthcheck) to. Envoy will not route to clusters that fail health checks.
 
+### Health Check Host
+Permit to change the host of the healthcheck when using wildcard. Example: healthcheck for `*.my-app.example.com` can't work natively, you can configure a specific path with `yggdrasil.uswitch.com/healthcheck-host: health.my-app.example.com`.
+
 * [config.core.v3.HealthCheck.HttpHealthCheck.Path](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/core/v3/health_check.proto#envoy-v3-api-field-config-core-v3-healthcheck-httphealthcheck-path)
 
-### Timeout
-Allows for adjusting the timeout in envoy. Currently this will set the following timeouts to this value:
+### Timeouts
+Allows for adjusting the timeout in envoy.
 
-* [config.route.v3.RouteAction.Timeout](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-routeaction-timeout)
-* [config.route.v3.RetryPolicy.PerTryTimeout](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-retrypolicy-per-try-timeout)
-* [config.cluster.v3.Cluster.ConnectTimeout](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/cluster/v3/cluster.proto#envoy-v3-api-field-config-cluster-v3-cluster-connect-timeout)
+The `yggdrasil.uswitch.com/cluster-timeout` annotation will set the [config.cluster.v3.Cluster.ConnectTimeout](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/cluster/v3/cluster.proto#envoy-v3-api-field-config-cluster-v3-cluster-connect-timeout)
+
+The `yggdrasil.uswitch.com/route-timeout` annotation will set the [config.route.v3.RouteAction.Timeout](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-routeaction-timeout)
+
+the `yggdrasil.uswitch.com/per-try-timeout` annotation will set the [config.route.v3.RetryPolicy.PerTryTimeout](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-retrypolicy-per-try-timeout)
+
+The `yggdrasil.uswitch.com/timeout` annotation will set all of the above with the same value. This annotation has the lowest priority, if set with one of the other TO annotations, the specific one will override the general annotation.
+
+
+### Weight
+Allows for adjusting the [load balancer weights](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/endpoint/v3/endpoint_components.proto#config-endpoint-v3-lbendpoint) in envoy.
 
 ### Retries
 Allows overwriting the default retry policy's [config.route.v3.RetryPolicy.RetryOn](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-retrypolicy-retry-on) set by the `--retry-on` flag (default 5xx). Accepts a comma-separated list of retry-on policies.
@@ -105,6 +121,7 @@ metadata:
   annotations:
     yggdrasil.uswitch.com/healthcheck-path: /healthz
     yggdrasil.uswitch.com/timeout: 30s
+    yggdrasil.uswitch.com/weight: "12"
     yggdrasil.uswitch.com/retry-on: gateway-error,connect-failure
 spec:
   rules:
@@ -130,6 +147,7 @@ Yggdrasil can be configured using a config file e.g:
 {
   "nodeName": "foo",
   "ingressClasses": ["multi-cluster", "multi-cluster-staging"],
+  "accessLog": "/var/log/envoy/",
   "syncSecrets": false,
   "certificates": [
     {
@@ -142,7 +160,9 @@ Yggdrasil can be configured using a config file e.g:
     {
       "token": "xxxxxxxxxxxxxxxx",
       "apiServer": "https://cluster1.api.com",
-      "ca": "pathto/cluster1/ca"
+      "ca": "pathto/cluster1/ca",
+      "maintenance": false,
+      "kubernetesClusterName": "cluster1"
     },
     {
       "tokenPath": "/path/to/a/token",
@@ -159,18 +179,29 @@ The list of certificates will be loaded by Yggdrasil and served to the Envoy nod
 The `ingressClasses` is a list of ingress classes that yggdrasil will watch for.
 Each cluster represents a different Kubernetes cluster with the token being a service account token for that cluster. `ca` is the Path to the ca certificate for that cluster.
 
+Maintenance is a new mode that allow to set a cluster in maintenance mode :
+- Upstream only in one cluster are keeped
+- Upstream in at least 1 cluster that is not in maintenance is deleted for the cluster in maintenance mode
+- Yggdrasil will Fatal if all clusters are in maintenance mode.
+
+This is optional and equal to `false` by default.
+
+kubernetesClusterName is the name of the cluster, it's only for information and will be used for metrics. Optional defaults to `""`
+
 ## Metrics
 Yggdrasil has a number of Go, gRPC, Prometheus, and Yggdrasil-specific metrics built in which can be reached by cURLing the `/metrics` path at the health API address/port (default: 8081). See [Flags](#Flags) for more information on configuring the health API address/port.
 
 The Yggdrasil-specific metrics which are available from the API are:
 
-| Name                        | Description                                    | Type     |
-|-----------------------------|------------------------------------------------|----------|
-| yggdrasil_cluster_updates   | Number of times the clusters have been updated | counter  |
-| yggdrasil_clusters          | Total number of clusters generated             | gauge    |
-| yggdrasil_ingresses         | Total number of matching ingress objects       | gauge    |
-| yggdrasil_listener_updates  | Number of times the listener has been updated  | counter  |
-| yggdrasil_virtual_hosts     | Total number of virtual hosts generated        | gauge    |
+| Name                                         | Description                                    | Type     |
+|----------------------------------------------|------------------------------------------------|----------|
+| yggdrasil_cluster_updates                    | Number of times the clusters have been updated | counter  |
+| yggdrasil_clusters                           | Total number of clusters generated             | gauge    |
+| yggdrasil_ingresses                          | Total number of matching ingress objects       | gauge    |
+| yggdrasil_listener_updates                   | Number of times the listener has been updated  | counter  |
+| yggdrasil_virtual_hosts                      | Total number of virtual hosts generated        | gauge    |
+| yggdrasil_kubernetes_cluster_in_maintenance | Return 1 if cluster in maintenance or 0        | gauge    |
+| yggdrasil_upstream_info                      | Provide informations relate to upstream        | gauge    |
 
 ## Flags
 ```
@@ -180,7 +211,8 @@ The Yggdrasil-specific metrics which are available from the API are:
 --config string                               config file
 --config-dump                                 Enable config dump endpoint at /configdump on the health-address HTTP server
 --debug                                       Log at debug level
---envoy-listener-ipv4-address string          IPv4 address by the envoy proxy to accept incoming connections (default "0.0.0.0")
+--access-log                                  path for the file logs
+--envoy-listener-ipv4-address strings         IPv4 addresses by the envoy proxy to accept incoming connections (default "0.0.0.0")
 --envoy-port uint32                           port by the envoy proxy to accept incoming connections (default 10000)
 --health-address string                       yggdrasil health API listen address (default "0.0.0.0:8081")
 -h, --help                                        help for yggdrasil

@@ -96,6 +96,8 @@ func getIngressInformer(factory informers.SharedInformerFactory, clientSet *kube
 	for _, apiGroup := range []string{"networking.k8s.io/v1", "networking.k8s.io/v1beta1", "extensions/v1beta1"} {
 		resources, err := clientSet.ServerResourcesForGroupVersion(apiGroup)
 		if err != nil {
+			// Log to tell earlier if the token have a problem
+			logrus.Warnf("API group %s not available: %v", apiGroup, err)
 			continue
 		}
 		for _, rs := range resources.APIResources {

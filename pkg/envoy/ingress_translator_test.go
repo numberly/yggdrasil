@@ -537,8 +537,8 @@ func TestValidateP384TlsSecret(t *testing.T) {
 	}}
 	if v, err := validateTlsSecret(sec); err != nil {
 		t.Errorf("expected no error, caught: %s", err.Error())
-	} else if v {
-		t.Errorf("expected ECDSA >256 cert to be invalid")
+	} else if !v {
+		t.Errorf("expected ECDSA P-384 cert to be valid")
 	}
 }
 

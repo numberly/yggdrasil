@@ -338,8 +338,8 @@ func validateTlsSecret(secret *v1.Secret) (bool, error) {
 		return false, nil
 	}
 
-	// discard P-384 EC private keys
-	// see https://github.com/envoyproxy/envoy/issues/10855
+	// discard > P-521 EC private keys
+	// P-384 & P-521 now supported, see https://github.com/envoyproxy/envoy/issues/10855
 	block, _ := pem.Decode(tlsCert)
 	if block == nil {
 		return false, fmt.Errorf("error parsing x509 certificate - no PEM block found")

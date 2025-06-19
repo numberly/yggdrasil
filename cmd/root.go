@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/signal"
 	"syscall"
@@ -24,10 +23,12 @@ import (
 )
 
 type clusterConfig struct {
-	APIServer string `json:"apiServer"`
-	Ca        string `json:"ca"`
-	Token     string `json:"token"`
-	TokenPath string `json:"tokenPath"`
+	APIServer             string `json:"apiServer"`
+	Ca                    string `json:"ca"`
+	Token                 string `json:"token"`
+	TokenPath             string `json:"tokenPath"`
+	Maintenance           bool   `json:"maintenance"`
+	KubernetesClusterName string `json:"kubernetesClusterName"`
 }
 
 type config struct {
@@ -35,10 +36,11 @@ type config struct {
 	NodeName                   string                    `json:"nodeName"`
 	Clusters                   []clusterConfig           `json:"clusters"`
 	SyncSecrets                bool                      `json:"syncSecrets"`
+	AccessLog                  string                    `json:"accessLog"`
 	Certificates               []envoy.Certificate       `json:"certificates"`
 	TrustCA                    string                    `json:"trustCA"`
 	UpstreamPort               uint32                    `json:"upstreamPort"`
-	EnvoyListenerIpv4Address   string                    `json:"envoyListenerIpv4Address"`
+	EnvoyListenerIpv4Address   []string                  `json:"envoyListenerIpv4Address"`
 	EnvoyPort                  uint32                    `json:"envoyPort"`
 	MaxEjectionPercentage      uint32                    `json:"maxEjectionPercentage"`
 	HostSelectionRetryAttempts int64                     `json:"hostSelectionRetryAttempts"`
@@ -46,6 +48,8 @@ type config struct {
 	UseRemoteAddress           bool                      `json:"useRemoteAddress"`
 	HttpExtAuthz               envoy.HttpExtAuthz        `json:"httpExtAuthz"`
 	HttpGrpcLogger             envoy.HttpGrpcLogger      `json:"httpGrpcLogger"`
+	DefaultTimeouts            envoy.DefaultTimeouts     `json:"defaultTimeouts"`
+	AlpnProtocols              []string                  `json:"alpnProtocols"`
 	AccessLogger               envoy.AccessLogger        `json:"accessLogger"`
 }
 
@@ -78,6 +82,7 @@ func init() {
 	rootCmd.PersistentFlags().String("address", "0.0.0.0:8080", "yggdrasil envoy control plane listen address")
 	rootCmd.PersistentFlags().String("health-address", "0.0.0.0:8081", "yggdrasil health API listen address")
 	rootCmd.PersistentFlags().String("node-name", "", "envoy node name")
+	rootCmd.PersistentFlags().String("access-log", "/var/log/envoy/", "envoy default access log file")
 	rootCmd.PersistentFlags().String("cert", "", "certfile")
 	rootCmd.PersistentFlags().String("key", "", "keyfile")
 	rootCmd.PersistentFlags().String("ca", "", "trustedCA")
@@ -86,7 +91,7 @@ func init() {
 	rootCmd.PersistentFlags().Bool("debug", false, "Log at debug level")
 	rootCmd.PersistentFlags().Bool("config-dump", false, "Enable config dump endpoint at /configdump on the health-address HTTP server")
 	rootCmd.PersistentFlags().Uint32("upstream-port", 443, "port used to connect to the upstream ingresses")
-	rootCmd.PersistentFlags().String("envoy-listener-ipv4-address", "0.0.0.0", "IPv4 address by the envoy proxy to accept incoming connections")
+	rootCmd.PersistentFlags().StringSlice("envoy-listener-ipv4-address", []string{"0.0.0.0"}, "IPv4 address by the envoy proxy to accept incoming connections")
 	rootCmd.PersistentFlags().Uint32("envoy-port", 10000, "port by the envoy proxy to accept incoming connections")
 	rootCmd.PersistentFlags().Int32("max-ejection-percentage", -1, "maximal percentage of hosts ejected via outlier detection. Set to >=0 to activate outlier detection in envoy.")
 	rootCmd.PersistentFlags().Int64("host-selection-retry-attempts", -1, "Number of host selection retry attempts. Set to value >=0 to enable")
@@ -109,11 +114,16 @@ func init() {
 	rootCmd.PersistentFlags().Bool("http-ext-authz-pack-as-bytes", false, "When this field is true, Envoy will send the body as raw bytes.")
 	rootCmd.PersistentFlags().Bool("http-ext-authz-failure-mode-allow", true, "Changes filters behaviour on errors")
 
+	rootCmd.PersistentFlags().Duration("default-route-timeout", 15*time.Second, "Default timeout of the routes")
+	rootCmd.PersistentFlags().Duration("default-cluster-timeout", 30*time.Second, "Default timeout of the cluster")
+	rootCmd.PersistentFlags().Duration("default-per-try-timeout", 5*time.Second, "Default timeout of PerTry")
+	rootCmd.PersistentFlags().StringSlice("alpn-protocols", []string{}, "exposed listener ALPN protocols")
 	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
 	viper.BindPFlag("configDump", rootCmd.PersistentFlags().Lookup("config-dump"))
 	viper.BindPFlag("address", rootCmd.PersistentFlags().Lookup("address"))
 	viper.BindPFlag("healthAddress", rootCmd.PersistentFlags().Lookup("health-address"))
 	viper.BindPFlag("nodeName", rootCmd.PersistentFlags().Lookup("node-name"))
+	viper.BindPFlag("accessLog", rootCmd.PersistentFlags().Lookup("access-log"))
 	viper.BindPFlag("ingressClasses", rootCmd.PersistentFlags().Lookup("ingress-classes"))
 	viper.BindPFlag("cert", rootCmd.PersistentFlags().Lookup("cert"))
 	viper.BindPFlag("key", rootCmd.PersistentFlags().Lookup("key"))
@@ -141,6 +151,10 @@ func init() {
 	viper.BindPFlag("httpExtAuthz.allowPartialMessage", rootCmd.PersistentFlags().Lookup("http-ext-authz-allow-partial-message"))
 	viper.BindPFlag("httpExtAuthz.packAsBytes", rootCmd.PersistentFlags().Lookup("http-ext-authz-pack-as-bytes"))
 	viper.BindPFlag("httpExtAuthz.FailureModeAllow", rootCmd.PersistentFlags().Lookup("http-ext-authz-failure-mode-allow"))
+	viper.BindPFlag("defaultTimeouts.Route", rootCmd.PersistentFlags().Lookup("default-route-timeout"))
+	viper.BindPFlag("defaultTimeouts.Cluster", rootCmd.PersistentFlags().Lookup("default-cluster-timeout"))
+	viper.BindPFlag("defaultTimeouts.PerTry", rootCmd.PersistentFlags().Lookup("default-per-try-timeout"))
+	viper.BindPFlag("alpnProtocols", rootCmd.PersistentFlags().Lookup("alpn-protocols"))
 }
 
 func initConfig() {
@@ -212,12 +226,12 @@ func main(*cobra.Command, []string) error {
 		certPath := certificate.Cert
 		keyPath := certificate.Key
 
-		certBytes, err := ioutil.ReadFile(certPath)
+		certBytes, err := os.ReadFile(certPath)
 		if err != nil {
 			log.Fatalf("Failed to read %s: %v", certPath, err)
 		}
 
-		keyBytes, err := ioutil.ReadFile(keyPath)
+		keyBytes, err := os.ReadFile(keyPath)
 		if err != nil {
 			log.Fatalf("Failed to read %s: %v", keyPath, err)
 		}
@@ -231,8 +245,9 @@ func main(*cobra.Command, []string) error {
 		c.Certificates,
 		viper.GetString("trustCA"),
 		viper.GetStringSlice("ingressClasses"),
+		viper.GetString("accessLog"),
 		envoy.WithUpstreamPort(uint32(viper.GetInt32("upstreamPort"))),
-		envoy.WithEnvoyListenerIpv4Address(viper.GetString("envoyListenerIpv4Address")),
+		envoy.WithEnvoyListenerIpv4Address(viper.GetStringSlice("envoyListenerIpv4Address")),
 		envoy.WithEnvoyPort(uint32(viper.GetInt32("envoyPort"))),
 		envoy.WithOutlierPercentage(viper.GetInt32("maxEjectionPercentage")),
 		envoy.WithHostSelectionRetryAttempts(viper.GetInt64("hostSelectionRetryAttempts")),
@@ -241,10 +256,13 @@ func main(*cobra.Command, []string) error {
 		envoy.WithHttpExtAuthzCluster(c.HttpExtAuthz),
 		envoy.WithHttpGrpcLogger(c.HttpGrpcLogger),
 		envoy.WithSyncSecrets(c.SyncSecrets),
+		envoy.WithDefaultTimeouts(c.DefaultTimeouts),
 		envoy.WithDefaultRetryOn(viper.GetString("retryOn")),
 		envoy.WithAccessLog(c.AccessLogger),
 		envoy.WithTracingProvider(viper.GetString("tracingProvider")),
+		envoy.WithAlpnProtocols(viper.GetStringSlice("alpnProtocols")),
 	)
+	configurator.ValidateAndFormatPath()
 	snapshotter := envoy.NewSnapshotter(envoyCache, configurator, aggregator)
 
 	go snapshotter.Run(aggregator)
@@ -276,17 +294,17 @@ func createClientConfig(path string) (*rest.Config, error) {
 	return clientcmd.BuildConfigFromFlags("", path)
 }
 
-func createSources(clusters []clusterConfig) ([]*kubernetes.Clientset, error) {
-	sources := []*kubernetes.Clientset{}
+func createSources(clusters []clusterConfig) ([]k8s.KubernetesConfig, error) {
+	var sources []k8s.KubernetesConfig
+	allInMaintenance := true
 
 	for _, cluster := range clusters {
-
 		var token string
 
 		if cluster.TokenPath != "" {
-			bytes, err := ioutil.ReadFile(cluster.TokenPath)
+			bytes, err := os.ReadFile(cluster.TokenPath)
 			if err != nil {
-				return sources, err
+				return nil, err
 			}
 			token = string(bytes)
 		} else {
@@ -302,16 +320,32 @@ func createSources(clusters []clusterConfig) ([]*kubernetes.Clientset, error) {
 		}
 		clientSet, err := kubernetes.NewForConfig(config)
 		if err != nil {
-			return sources, err
+			return nil, err
 		}
-		sources = append(sources, clientSet)
+
+		kubernetesConfig := k8s.NewKubernetesConfig(cluster.Maintenance, clientSet, cluster.KubernetesClusterName)
+
+		envoy.KubernetesClusterInMaintenance.WithLabelValues(cluster.APIServer).Set(float64(0))
+
+		if cluster.Maintenance {
+			envoy.KubernetesClusterInMaintenance.WithLabelValues(cluster.APIServer).Set(float64(1))
+			log.Warnf("Kubernetes Cluster with API Endpoint %s is in maintenance mode", cluster.APIServer)
+		} else {
+			allInMaintenance = false
+		}
+
+		sources = append(sources, *kubernetesConfig)
+	}
+
+	if allInMaintenance {
+		log.Fatal("All clusters are in maintenance mode")
 	}
 
 	return sources, nil
 }
 
-func configFromKubeConfig(paths []string) ([]*kubernetes.Clientset, error) {
-	sources := []*kubernetes.Clientset{}
+func configFromKubeConfig(paths []string) ([]k8s.KubernetesConfig, error) {
+	var sources []k8s.KubernetesConfig
 
 	for _, configPath := range paths {
 		config, err := createClientConfig(configPath)
@@ -322,7 +356,10 @@ func configFromKubeConfig(paths []string) ([]*kubernetes.Clientset, error) {
 		if err != nil {
 			return sources, err
 		}
-		sources = append(sources, clientSet)
+
+		kubernetesConfig := k8s.NewKubernetesConfig(false, clientSet, "")
+
+		sources = append(sources, *kubernetesConfig)
 	}
 
 	return sources, nil

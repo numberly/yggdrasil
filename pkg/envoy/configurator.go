@@ -3,6 +3,7 @@ package envoy
 import (
 	"errors"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,12 @@ type UpstreamHealthCheck struct {
 	Interval           time.Duration `json:"interval"`
 	UnhealthyThreshold uint32        `json:"unhealthyThreshold"`
 	HealthyThreshold   uint32        `json:"healtyThreshold"`
+}
+
+type DefaultTimeouts struct {
+	Cluster time.Duration
+	Route   time.Duration
+	PerTry  time.Duration
 }
 
 type HttpExtAuthz struct {
@@ -56,20 +63,23 @@ type KubernetesConfigurator struct {
 	ingressClasses             []string
 	nodeID                     string
 	syncSecrets                bool
+	accessLog                  string
 	certificates               []Certificate
 	trustCA                    string
 	upstreamPort               uint32
 	envoyListenPort            uint32
-	envoyListenerIpv4Address   string
+	envoyListenerIpv4Address   []string
 	outlierPercentage          int32
 	hostSelectionRetryAttempts int64
 	upstreamHealthCheck        UpstreamHealthCheck
 	useRemoteAddress           bool
 	httpExtAuthz               HttpExtAuthz
 	httpGrpcLogger             HttpGrpcLogger
+	defaultTimeouts            DefaultTimeouts
 	accessLogger               AccessLogger
 	defaultRetryOn             string
 	tracingProvider            string
+	alpnProtocols              []string
 
 	previousConfig  *envoyConfiguration
 	listenerVersion string
@@ -78,12 +88,31 @@ type KubernetesConfigurator struct {
 }
 
 // NewKubernetesConfigurator returns a Kubernetes configurator given a lister and ingress class
-func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca string, ingressClasses []string, options ...option) *KubernetesConfigurator {
-	c := &KubernetesConfigurator{ingressClasses: ingressClasses, nodeID: nodeID, certificates: certificates, trustCA: ca}
+func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca string, ingressClasses []string, accessLog string, options ...option) *KubernetesConfigurator {
+	c := &KubernetesConfigurator{ingressClasses: ingressClasses, nodeID: nodeID, certificates: certificates, trustCA: ca, accessLog: accessLog}
 	for _, opt := range options {
 		opt(c)
 	}
 	return c
+}
+
+func (c *KubernetesConfigurator) ValidateAndFormatPath() {
+	if c.accessLog == "" {
+		logrus.Fatal("accessLog path cannot be empty")
+	}
+
+	// Clean the path and make it absolute
+	c.accessLog = filepath.Clean(c.accessLog)
+	absolutePath, err := filepath.Abs(c.accessLog)
+	if err != nil {
+		logrus.Fatalf("invalid path: %v", err)
+	}
+	c.accessLog = absolutePath
+
+	// Ensure the path ends with a directory separator if it's a directory
+	if strings.HasSuffix(c.accessLog, string(filepath.Separator)) {
+		c.accessLog = string(filepath.Separator)
+	}
 }
 
 // Generate creates a new snapshot
@@ -92,7 +121,7 @@ func (c *KubernetesConfigurator) Generate(ingresses []*k8s.Ingress, secrets []*v
 	defer c.Unlock()
 
 	validIngresses := validIngressFilter(classFilter(ingresses, c.ingressClasses))
-	config := translateIngresses(validIngresses, c.syncSecrets, secrets)
+	config := translateIngresses(validIngresses, c.syncSecrets, secrets, c.defaultTimeouts, c.accessLog)
 
 	vmatch, cmatch := config.equals(c.previousConfig)
 
@@ -204,7 +233,7 @@ func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyCon
 			Cert:  virtualHost.TlsCert,
 			Key:   virtualHost.TlsKey,
 		}
-		filterChain, err := c.makeFilterChain(certificate, []*route.VirtualHost{envoyVhost})
+		filterChain, err := c.makeFilterChain(certificate, []*route.VirtualHost{envoyVhost}, config.AccessLog)
 		if err != nil {
 			logrus.Warnf("error making filter chain: %v", err)
 		}
@@ -217,7 +246,7 @@ func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyCon
 			Cert:  c.certificates[0].Cert,
 			Key:   c.certificates[0].Key,
 		}
-		if defaultFC, err := c.makeFilterChain(defaultCert, allVhosts); err != nil {
+		if defaultFC, err := c.makeFilterChain(defaultCert, allVhosts, config.AccessLog); err != nil {
 			logrus.Warnf("error making default filter chain: %v", err)
 		} else {
 			filterChains = append(filterChains, &defaultFC)
@@ -237,7 +266,7 @@ func (c *KubernetesConfigurator) generateHTTPFilterChain(config *envoyConfigurat
 		virtualHosts = append(virtualHosts, vhost)
 	}
 
-	httpConnectionManager, err := c.makeConnectionManager(virtualHosts)
+	httpConnectionManager, err := c.makeConnectionManager(virtualHosts, config.AccessLog)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +312,7 @@ func (c *KubernetesConfigurator) generateTLSFilterChains(config *envoyConfigurat
 			continue
 		}
 
-		filterChain, err := c.makeFilterChain(certificate, virtualHosts)
+		filterChain, err := c.makeFilterChain(certificate, virtualHosts, config.AccessLog)
 		if err != nil {
 			log.Printf("error making filter chain: %v", err)
 		}

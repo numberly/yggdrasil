@@ -53,6 +53,28 @@ HMDnomVYrn/CmceQFWDWQ/dLG3OgiffsjhxOS0IaaDKgUxJH7/eW5AesWmhg1z9x
 0JSjab6mTneQMtHukPZEaLmwPlksEA1k2A/wph9mEjyZpgS4IogLORA=
 -----END PRIVATE KEY-----`
 
+	// dummy p-521 cert
+	p521crt = `-----BEGIN CERTIFICATE-----
+MIIB/TCCAV6gAwIBAgIUalLHxUR4R/cATXoia/hwou1UYY0wCgYIKoZIzj0EAwIw
+EDEOMAwGA1UEAwwFZHVtbXkwHhcNMjUwNjE3MDgyNzU5WhcNMjYwNjE3MDgyNzU5
+WjAQMQ4wDAYDVQQDDAVkdW1teTCBmzAQBgcqhkjOPQIBBgUrgQQAIwOBhgAEAKIU
+tBnFN/IIlNPkg/qiWSq8OtOJA76BrltrjGm7RkXCh7AGEi4JhBo7kElp/oqE8D6W
+Lze2+NHoczEZ6P2vOXbPAHIj9J+ti1fFm9prRTeV0Hn+YOqWBirnzu+2X3Vi2gSF
+q2tmIIMyWQBqt+T4zGo1qBTpfX1cIBG7baMMjK4xC7QJo1MwUTAdBgNVHQ4EFgQU
+aZAE5vnNQV2ztM/47huVttmWHjYwHwYDVR0jBBgwFoAUaZAE5vnNQV2ztM/47huV
+ttmWHjYwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgOBjAAwgYgCQgDtOZt1
+OrmrEMbnB48DR52iFw1OR1ppXdCno4Owk2Amu/N3tuIsKctxtSrxQhejh4L+BNHh
+y1mXVMilq41U+gbhZAJCAUKFcuGqUdMFUhCmKHC78YIN8PCeZ56mE2hqSwprBJGS
+pzAmjBamDqkRJP4UdTjER1KyQfZJ1126r/TxA9+Tnn1j
+-----END CERTIFICATE-----`
+	p521key = `-----BEGIN EC PRIVATE KEY-----
+MIHcAgEBBEIAmn+TNqs72qAK6BfgaeNDlE+lr/+vP54s+zQAv4dWwJoGLoouzNSr
+Tim9rC01Ut1+5b9M4W5Ridx+E6aOU8G46fCgBwYFK4EEACOhgYkDgYYABACiFLQZ
+xTfyCJTT5IP6olkqvDrTiQO+ga5ba4xpu0ZFwoewBhIuCYQaO5BJaf6KhPA+li83
+tvjR6HMxGej9rzl2zwByI/SfrYtXxZvaa0U3ldB5/mDqlgYq587vtl91YtoEhatr
+ZiCDMlkAarfk+MxqNagU6X19XCARu22jDIyuMQu0CQ==
+-----END EC PRIVATE KEY-----`
+
 	// dummy rsa2048 cert
 	rsa2048crt = `-----BEGIN CERTIFICATE-----
 MIIDETCCAfkCFArEpbFYH4WmMV2id+QeAriE3c+CMA0GCSqGSIb3DQEBCwUAMEUx
@@ -527,6 +549,18 @@ func TestValidateWrongPEMTlsSecret(t *testing.T) {
 	}}
 	if v, err := validateTlsSecret(sec); err == nil || v {
 		t.Errorf("expected PEM error, got none")
+	}
+}
+
+func TestValidateP521TlsSecret(t *testing.T) {
+	sec := &v1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "sec"}, Data: map[string][]byte{
+		"tls.crt": []byte(p521crt),
+		"tls.key": []byte(p521key),
+	}}
+	if v, err := validateTlsSecret(sec); err != nil {
+		t.Errorf("expected no error, caught: %s", err.Error())
+	} else if !v {
+		t.Errorf("expected ECDSA P-521 cert to be valid")
 	}
 }
 

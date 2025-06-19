@@ -338,8 +338,8 @@ func validateTlsSecret(secret *v1.Secret) (bool, error) {
 		return false, nil
 	}
 
-	// discard P-384 EC private keys
-	// see https://github.com/envoyproxy/envoy/issues/10855
+	// discard > P-521 EC private keys
+	// P-256, P-384 & P-521 are now supported (see https://github.com/envoyproxy/envoy/issues/10855)
 	block, _ := pem.Decode(tlsCert)
 	if block == nil {
 		return false, fmt.Errorf("error parsing x509 certificate - no PEM block found")
@@ -353,8 +353,8 @@ func validateTlsSecret(secret *v1.Secret) (bool, error) {
 		if !ok {
 			return false, fmt.Errorf("error in *ecdsa.PublicKey type assertion")
 		}
-		if ecdsaPub.Curve.Params().BitSize > 256 {
-			logrus.Infof("skipping ECDSA %s certificate %s/%s: only P-256 certificates are supported", ecdsaPub.Curve.Params().Name, secret.Namespace, secret.Name)
+		if ecdsaPub.Curve.Params().BitSize > 521 {
+			logrus.Infof("skipping ECDSA %s certificate %s/%s: only P-256, P-384 and P-521 certificates are supported", ecdsaPub.Curve.Params().Name, secret.Namespace, secret.Name)
 			return false, nil
 		}
 	}

@@ -139,7 +139,7 @@ Downstream TLS certificates can be dynamically fetched and updated from Kubernet
 
 In this mode, only a single `certificate` may be specified in Yggdrasil configuration. It will be used for hosts with misconfigured or invalid secret.
 
-**Note**: ECDSA >256 keys are not supported by envoy and will be discarded. See https://github.com/envoyproxy/envoy/issues/10855
+**Note**: ECDSA P-256, P-384 and P-521 keys are now supported by envoy (see https://github.com/envoyproxy/envoy/issues/10855)
 
 ## Configuration
 Yggdrasil can be configured using a config file e.g:

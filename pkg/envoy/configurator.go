@@ -19,9 +19,10 @@ import (
 )
 
 type Certificate struct {
-	Hosts []string `json:"hosts"`
-	Cert  string   `json:"cert"`
-	Key   string   `json:"key"`
+	Hosts     []string `json:"hosts"`
+	Cert      string   `json:"cert"`
+	Key       string   `json:"key"`
+	TrustedCa string   `json:"TrustedCa,omitempty"` // ommited if empty, used for mTLS downstream
 }
 
 type UpstreamHealthCheck struct {
@@ -229,9 +230,10 @@ func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyCon
 			continue
 		}
 		certificate := Certificate{
-			Hosts: []string{virtualHost.Host},
-			Cert:  virtualHost.TlsCert,
-			Key:   virtualHost.TlsKey,
+			Hosts:     []string{virtualHost.Host},
+			Cert:      virtualHost.TlsCert,
+			Key:       virtualHost.TlsKey,
+			TrustedCa: virtualHost.TrustedCa,
 		}
 		filterChain, err := c.makeFilterChain(certificate, []*route.VirtualHost{envoyVhost}, config.AccessLog)
 		if err != nil {

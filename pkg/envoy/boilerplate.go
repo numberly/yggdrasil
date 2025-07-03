@@ -337,6 +337,17 @@ func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtua
 			TlsMinimumProtocolVersion: auth.TlsParameters_TLSv1_2,
 		},
 	}
+	// If the certificate has a trusted CA, we set it in the TLS context (mTLS downstream)
+	if certificate.TrustedCa != "" {
+		tls.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_ValidationContext{
+			ValidationContext: &auth.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_InlineString{InlineString: certificate.TrustedCa},
+				},
+			},
+		}
+		tls.RequireClientCertificate = &wrappers.BoolValue{Value: true}
+	}
 
 	anyTls, err := anypb.New(tls)
 	if err != nil {

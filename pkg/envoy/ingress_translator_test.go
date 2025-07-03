@@ -600,6 +600,90 @@ func TestValidateRsa2048TlsSecret(t *testing.T) {
 	}
 }
 
+func TestTranslateIngressesWithMTLSAnnotations(t *testing.T) {
+	ingress := newGenericIngress("example.com", "upstream-service")
+	ingress.Namespace = "default"
+	ingress.Annotations = map[string]string{
+		"yggdrasil.uswitch.com/auth-tls-secret":        "ca-secret",
+		"yggdrasil.uswitch.com/auth-tls-verify-client": "true",
+	}
+
+	secrets := []*v1.Secret{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ca-secret",
+				Namespace: "default",
+			},
+			Data: map[string][]byte{
+				"tls.crt": []byte("dummy-cert"),
+				"tls.key": []byte("dummy-key"),
+			},
+		},
+	}
+
+	timeouts := DefaultTimeouts{
+		Route:   5 * time.Second,
+		PerTry:  2 * time.Second,
+		Cluster: 10 * time.Second,
+	}
+
+	cfg := translateIngresses([]*k8s.Ingress{ingress}, true, secrets, timeouts, "/var/log/envoy/access.log")
+
+	if len(cfg.Clusters) != 1 {
+		t.Fatalf("Expected 1 cluster, got %d", len(cfg.Clusters))
+	}
+	if cfg.Clusters[0].authTLSSecret != "default/ca-secret" {
+		t.Errorf("Expected authTLSSecret to be 'default/ca-secret', got '%s'", cfg.Clusters[0].authTLSSecret)
+	}
+	if cfg.Clusters[0].authTLSVerifyClient != "true" {
+		t.Errorf("Expected authTLSVerifyClient to be true")
+	}
+}
+
+func TestTranslateIngressesWithInvalidMTLSAnnotations2(t *testing.T) {
+	ingress := newGenericIngress("example.com", "upstream-service")
+	ingress.Annotations = map[string]string{
+		"yggdrasil.uswitch.com/auth-tls-verify-client": "nottrue",
+	}
+
+	timeouts := DefaultTimeouts{
+		Route:   5 * time.Second,
+		PerTry:  2 * time.Second,
+		Cluster: 10 * time.Second,
+	}
+
+	cfg := translateIngresses([]*k8s.Ingress{ingress}, false, nil, timeouts, "/var/log/envoy/access.log")
+
+	if len(cfg.Clusters) != 1 {
+		t.Fatalf("Expected 1 cluster, got %d", len(cfg.Clusters))
+	}
+	if cfg.Clusters[0].authTLSVerifyClient != "false" {
+		t.Errorf("Expected authTLSVerifyClient to default to false on invalid input, got '%s'", cfg.Clusters[0].authTLSVerifyClient)
+	}
+}
+
+func TestTranslateIngressesWithNoSecretConfigured(t *testing.T) {
+	ingress := newGenericIngress("example.com", "upstream-service")
+	ingress.Annotations = map[string]string{
+		"yggdrasil.uswitch.com/auth-tls-secret": "ca-secret",
+	}
+
+	timeouts := DefaultTimeouts{
+		Route:   5 * time.Second,
+		PerTry:  2 * time.Second,
+		Cluster: 10 * time.Second,
+	}
+
+	cfg := translateIngresses([]*k8s.Ingress{ingress}, false, nil, timeouts, "/var/log/envoy/access.log")
+
+	if len(cfg.Clusters) != 1 {
+		t.Fatalf("Expected 1 cluster, got %d", len(cfg.Clusters))
+	}
+	if cfg.Clusters[0].authTLSSecret != "" {
+		t.Errorf("Expected authTLSSecret to be empty on invalid input, got '%s'", cfg.Clusters[0].authTLSSecret)
+	}
+}
+
 func newIngress(specHost string, loadbalancerHost string) v1beta1.Ingress {
 	return v1beta1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{

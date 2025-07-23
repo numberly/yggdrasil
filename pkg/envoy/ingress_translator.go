@@ -110,15 +110,17 @@ type LBHost struct {
 }
 
 type cluster struct {
-	Name                string
-	VirtualHost         string
-	HealthCheckPath     string
-	HealthCheckHost     string // with Wildcard, the HealthCheck host can be different than the VirtualHost
-	HttpVersion         string
-	Timeout             time.Duration
-	Hosts               []LBHost
-	authTLSSecret       string // the secret name of the CA : could be "ca-secret"
-	authTLSVerifyClient string // Verify or not the client cert (can be either true or false)
+	Name                   string
+	VirtualHost            string
+	HealthCheckPath        string
+	HealthCheckHost        string // with Wildcard, the HealthCheck host can be different than the VirtualHost
+	HttpVersion            string
+	Timeout                time.Duration
+	Hosts                  []LBHost
+	authTLSSecret          string // the secret name of the CA : could be "ca-secret"
+	authTLSVerifyClient    string // Verify or not the client cert (can be either true or false)
+	authTLSEnvoyClientCert string // the envoy cert, if authTLSSecret is set, this will be used for mTLS between envoy and the backend
+	authTLSEnvoyClientKey  string // the envoy key, if authTLSSecret is set, this will be used for mTLS between envoy and the backend
 }
 
 func (c *cluster) identity() string {
@@ -311,6 +313,13 @@ func (ing *envoyIngress) setAuthTlsSecret(version string) {
 
 func (ing *envoyIngress) setAuthTlsVerifyClient(verify string) {
 	ing.cluster.authTLSVerifyClient = verify
+}
+func (ing *envoyIngress) setAuthTlsEnvoyClientCert(cert string) {
+	ing.cluster.authTLSEnvoyClientCert = cert
+}
+
+func (ing *envoyIngress) setAuthTlsEnvoyClientKey(key string) {
+	ing.cluster.authTLSEnvoyClientKey = key
 }
 
 // hostMatch returns true if tlsHost and ruleHost match, with wildcard support
@@ -553,16 +562,19 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 				// 	envoyIngress.setUpstreamHttpVersion(val)
 				// }
 			}
-
 			if ingress.Annotations["yggdrasil.uswitch.com/auth-tls-secret"] != "" {
 				val := ingress.Annotations["yggdrasil.uswitch.com/auth-tls-secret"]
 				caSecret, err := getCaTlsSecret(ingress, secrets) // auth-tls-secret is only the name of the secret, it does not contain the namespace
 				if err != nil {
 					logrus.Warnf("Failed to retrive auth-tls-secret %s/%s: %s", ingress.Namespace, val, err.Error())
 				} else {
-					caCert := string(caSecret.Data["tls.crt"])
+					caCert := string(caSecret.Data["ca.crt"])
+					envoyClientCert := string(caSecret.Data["tls.crt"])
+					envoyClientKey := string(caSecret.Data["tls.key"])
 					envoyIngress.setAuthTlsSecret(fmt.Sprintf("%s/%s", ingress.Namespace, val))
 					envoyIngress.vhost.TrustedCa = caCert
+					envoyIngress.setAuthTlsEnvoyClientCert(envoyClientCert)
+					envoyIngress.setAuthTlsEnvoyClientKey(envoyClientKey)
 				}
 			}
 

@@ -492,6 +492,19 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 				},
 			},
 		}
+		if c.authTLSVerifyClient == "true" {
+			tls.Sni = c.VirtualHost
+			tls.CommonTlsContext.TlsCertificates = []*auth.TlsCertificate{
+				{
+					CertificateChain: &core.DataSource{
+						Specifier: &core.DataSource_InlineString{InlineString: c.authTLSEnvoyClientCert},
+					},
+					PrivateKey: &core.DataSource{
+						Specifier: &core.DataSource_InlineString{InlineString: c.authTLSEnvoyClientKey},
+					},
+				},
+			}
+		}
 	} else {
 		tls = nil
 	}

@@ -82,6 +82,8 @@ Yggdrasil allows for some customisation of the route and cluster config per Ingr
 | [yggdrasil.uswitch.com/per-try-timeout](#timeouts)           | duration |
 | [yggdrasil.uswitch.com/weight](#weight)                      | uint32   |
 | [yggdrasil.uswitch.com/retry-on](#retries)                   | string   |
+| [yggdrasil.uswitch.com/auth-tls-verify-client](#mtls)        | string   |
+| [yggdrasil.uswitch.com/auth-tls-secret](#mtls)               | string   |
 
 ### Health Check Path
 Specifies a path to configure a [HTTP health check](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/core/v3/health_check.proto#config-core-v3-healthcheck-httphealthcheck) to. Envoy will not route to clusters that fail health checks.
@@ -108,6 +110,13 @@ Allows for adjusting the [load balancer weights](https://www.envoyproxy.io/docs/
 
 ### Retries
 Allows overwriting the default retry policy's [config.route.v3.RetryPolicy.RetryOn](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-retrypolicy-retry-on) set by the `--retry-on` flag (default 5xx). Accepts a comma-separated list of retry-on policies.
+
+### mTLS
+Used to enable mTLS between client and Envoy.
+
+The `yggdrasil.uswitch.com/auth-tls-verify-client` annotation allow you enable or disable mTLS, can be either `true` or `false` (default).
+
+The `yggdrasil.uswitch.com/auth-tls-secret` annotation allow you to specify the name of the Kubernetes TLS secret containing the CA certificate used to verify client certificates.
 
 ### Example
 Below is an example of an ingress with some of the annotations specified

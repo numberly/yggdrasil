@@ -12,6 +12,13 @@ type httpFilterBuilder struct {
 	filters []*hcm.HttpFilter
 }
 
+type CustomHttpFilter struct {
+	Name        string                 `json:"name"`
+	TypedConfig map[string]interface{} `json:"typed_config"`
+}
+
+type CustomHttpFiltersConfig []CustomHttpFilter
+
 func (b *httpFilterBuilder) Add(filter *hcm.HttpFilter) *httpFilterBuilder {
 	b.filters = append(b.filters, filter)
 	return b

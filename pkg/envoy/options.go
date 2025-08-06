@@ -106,3 +106,10 @@ func WithAlpnProtocols(alpnProtocols []string) option {
 		c.alpnProtocols = alpnProtocols
 	}
 }
+
+// WithCustomHttpFilterFile configures the custom HTTP filter file path
+func WithCustomHttpFilterFile(customHttpFilterFile string) option {
+	return func(c *KubernetesConfigurator) {
+		c.customHttpFilterFile = customHttpFilterFile
+	}
+}

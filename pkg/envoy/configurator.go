@@ -80,6 +80,7 @@ type KubernetesConfigurator struct {
 	defaultRetryOn             string
 	tracingProvider            string
 	alpnProtocols              []string
+	customHttpFilterFile       string
 
 	previousConfig  *envoyConfiguration
 	listenerVersion string

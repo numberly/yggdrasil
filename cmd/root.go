@@ -113,6 +113,7 @@ func init() {
 	rootCmd.PersistentFlags().Bool("http-ext-authz-allow-partial-message", true, "When this field is true, Envoy will buffer the message until max_request_bytes is reached")
 	rootCmd.PersistentFlags().Bool("http-ext-authz-pack-as-bytes", false, "When this field is true, Envoy will send the body as raw bytes.")
 	rootCmd.PersistentFlags().Bool("http-ext-authz-failure-mode-allow", true, "Changes filters behaviour on errors")
+	rootCmd.PersistentFlags().String("custom-http-filter-file", "", "Path to a custom HTTP filter file to load. The file should contain a valid Envoy HTTP filters list in JSON protobuff.")
 
 	rootCmd.PersistentFlags().Duration("default-route-timeout", 15*time.Second, "Default timeout of the routes")
 	rootCmd.PersistentFlags().Duration("default-cluster-timeout", 30*time.Second, "Default timeout of the cluster")
@@ -155,6 +156,7 @@ func init() {
 	viper.BindPFlag("defaultTimeouts.Cluster", rootCmd.PersistentFlags().Lookup("default-cluster-timeout"))
 	viper.BindPFlag("defaultTimeouts.PerTry", rootCmd.PersistentFlags().Lookup("default-per-try-timeout"))
 	viper.BindPFlag("alpnProtocols", rootCmd.PersistentFlags().Lookup("alpn-protocols"))
+	viper.BindPFlag("customHttpFilterFile", rootCmd.PersistentFlags().Lookup("custom-http-filter-file"))
 }
 
 func initConfig() {
@@ -261,6 +263,7 @@ func main(*cobra.Command, []string) error {
 		envoy.WithAccessLog(c.AccessLogger),
 		envoy.WithTracingProvider(viper.GetString("tracingProvider")),
 		envoy.WithAlpnProtocols(viper.GetStringSlice("alpnProtocols")),
+		envoy.WithCustomHttpFilterFile(viper.GetString("customHttpFilterFile")),
 	)
 	configurator.ValidateAndFormatPath()
 	snapshotter := envoy.NewSnapshotter(envoyCache, configurator, aggregator)

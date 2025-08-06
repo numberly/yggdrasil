@@ -1,8 +1,10 @@
 package envoy
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -15,13 +17,16 @@ import (
 	tracing "github.com/envoyproxy/go-control-plane/envoy/config/trace/v3"
 	eal "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
 	gal "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
+	buffer "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/buffer/v3"
 	eauthz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	hcfg "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
+	wasm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/wasm/v3"
 	tls_inspector "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	previousHosts "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/host/previous_hosts/v3"
 	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	envoy_extension_http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
+	wasmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/wasm/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	any "github.com/golang/protobuf/ptypes/any"
 	"github.com/golang/protobuf/ptypes/duration"
@@ -123,6 +128,124 @@ func makeVirtualHost(vhost *virtualHost, reselectionAttempts int64, defaultRetry
 		},
 	}
 	return &virtualHost, nil
+}
+
+func loadCustomHttpFilters(filePath string) ([]*hcm.HttpFilter, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read custom HTTP filter file `%s`: %w", filePath, err)
+	}
+	var config CustomHttpFiltersConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal custom HTTP filter file `%s`: %w", filePath, err)
+	}
+	var filters []*hcm.HttpFilter
+	for _, filter := range config {
+		var anyConfig *anypb.Any
+		switch filter.Name {
+		case "envoy.filters.http.wasm":
+			wasmConfig, err := makeWasmConfig(filter.TypedConfig)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create wasm config: %w", err)
+			}
+			anyConfig, err = anypb.New(wasmConfig)
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert wasm config to Any: %w", err)
+			}
+		case "envoy.filters.http.buffer":
+			bufferConfig, err := makeBufferConfig(filter.TypedConfig)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create buffer config: %w", err)
+			}
+			anyConfig, err = anypb.New(bufferConfig)
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert buffer config to Any: %w", err)
+			}
+		default:
+			return nil, fmt.Errorf("unsupported filter type: %s", filter.Name)
+		}
+		filters = append(filters, &hcm.HttpFilter{
+			Name: filter.Name,
+			ConfigType: &hcm.HttpFilter_TypedConfig{
+				TypedConfig: anyConfig,
+			},
+		})
+	}
+	return filters, nil
+}
+
+func makeBufferConfig(typedConfig map[string]interface{}) (*buffer.Buffer, error) {
+	maxRequestBytes, ok := typedConfig["maxRequestBytes"].(float64)
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid `maxRequestBytes` field in buffer typedConfig")
+	}
+
+	return &buffer.Buffer{
+		MaxRequestBytes: wrapperspb.UInt32(uint32(maxRequestBytes)),
+	}, nil
+}
+
+func makeWasmConfig(typedConfig map[string]interface{}) (*wasm.Wasm, error) {
+	value, ok := typedConfig["value"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid `value` field in wasm typedConfig")
+	}
+	config, ok := value["config"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid `config` field in wasm typedConfig")
+	}
+	vmConfig, ok := config["vm_config"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid `vm_config` field in wasm config")
+	}
+	runtime, ok := vmConfig["runtime"].(string)
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid `runtime` field in wasm vm_config")
+	}
+	vmID, ok := vmConfig["vm_id"].(string)
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid `vm_id` field in wasm vm_config")
+	}
+	code, ok := vmConfig["code"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid `code` field in wasm vm_config")
+	}
+	local, ok := code["local"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid `local` field in wasm code")
+	}
+	filename, ok := local["filename"].(string)
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid `filename` field in wasm local code")
+	}
+	configuration, ok := config["configuration"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid `configuration` field in wasm config")
+	}
+	return &wasm.Wasm{
+		Config: &wasmv3.PluginConfig{
+			Name:   config["name"].(string),
+			RootId: config["root_id"].(string),
+			Configuration: &anypb.Any{
+				Value: []byte(configuration["value"].(string)),
+			},
+			Vm: &wasmv3.PluginConfig_VmConfig{
+				VmConfig: &wasmv3.VmConfig{
+					Runtime: runtime,
+					VmId:    vmID,
+					Code: &core.AsyncDataSource{
+						Specifier: &core.AsyncDataSource_Local{
+							Local: &core.DataSource{
+								Specifier: &core.DataSource_Filename{
+									Filename: filename,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}, nil
 }
 
 func makeHealthConfig() *hcfg.HealthCheck {
@@ -247,11 +370,21 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 	// HTTP Filters
 	filterBuilder := &httpFilterBuilder{}
 
+	// custom HTTP filters
+	if c.customHttpFilterFile != "" {
+		customFilters, err := loadCustomHttpFilters(c.customHttpFilterFile)
+		if err != nil {
+			log.Fatalf("failed to load custom HTTP filters: %s", err)
+		}
+		for _, filter := range customFilters {
+			filterBuilder.Add(filter)
+		}
+	}
+
 	anyHealthConfig, err := anypb.New(makeHealthConfig())
 	if err != nil {
 		log.Fatalf("failed to marshal healthcheck config struct to typed struct: %s", err)
 	}
-
 	filterBuilder.Add(&hcm.HttpFilter{
 		Name:       "envoy.filters.http.health_check",
 		ConfigType: &hcm.HttpFilter_TypedConfig{TypedConfig: anyHealthConfig},
@@ -268,7 +401,6 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 			ConfigType: &hcm.HttpFilter_TypedConfig{TypedConfig: anyExtAuthzConfig},
 		})
 	}
-
 	filter, err := filterBuilder.Filters()
 	if err != nil {
 		return &hcm.HttpConnectionManager{}, err

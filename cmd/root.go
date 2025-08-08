@@ -113,7 +113,7 @@ func init() {
 	rootCmd.PersistentFlags().Bool("http-ext-authz-allow-partial-message", true, "When this field is true, Envoy will buffer the message until max_request_bytes is reached")
 	rootCmd.PersistentFlags().Bool("http-ext-authz-pack-as-bytes", false, "When this field is true, Envoy will send the body as raw bytes.")
 	rootCmd.PersistentFlags().Bool("http-ext-authz-failure-mode-allow", true, "Changes filters behaviour on errors")
-	rootCmd.PersistentFlags().String("custom-http-filter-file", "", "Path to a custom HTTP filter file to load. The file should contain a valid Envoy HTTP filters list in JSON protobuff.")
+	rootCmd.PersistentFlags().String("custom-http-filter-file", "", "Path to a custom listener HTTP filter file to load. The file should contain a valid Envoy HTTP filters list in JSON protobuff.")
 
 	rootCmd.PersistentFlags().Duration("default-route-timeout", 15*time.Second, "Default timeout of the routes")
 	rootCmd.PersistentFlags().Duration("default-cluster-timeout", 30*time.Second, "Default timeout of the cluster")

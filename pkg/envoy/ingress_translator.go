@@ -118,13 +118,24 @@ type LBHost struct {
 }
 
 type cluster struct {
-	Name            string
-	VirtualHost     string
-	HealthCheckPath string
-	HealthCheckHost string // with Wildcard, the HealthCheck host can be different than the VirtualHost
-	HttpVersion     string
-	Timeout         time.Duration
-	Hosts           []LBHost
+	Name                         string
+	VirtualHost                  string
+	HealthCheckPath              string
+	HealthCheckHost              string // with Wildcard, the HealthCheck host can be different than the VirtualHost
+	HttpVersion                  string
+	Timeout                      time.Duration
+	Hosts                        []LBHost
+	StickySessionChangeOnFailure *bool // nil = not set (sticky sessions disabled), false = persist to unhealthy backend
+}
+
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 
 func (c *cluster) identity() string {
@@ -161,6 +172,10 @@ func (c *cluster) Equals(other *cluster) bool {
 	}
 
 	if c.HttpVersion != other.HttpVersion {
+		return false
+	}
+
+	if !boolPtrEqual(c.StickySessionChangeOnFailure, other.StickySessionChangeOnFailure) {
 		return false
 	}
 
@@ -391,6 +406,9 @@ func (envoyIng *envoyIngress) addStickySession(ingress *k8s.Ingress) {
 	envoyIng.vhost.StickySessionCookieName = cookieName
 	envoyIng.vhost.StickySessionCookiePath = cookiePath
 	envoyIng.vhost.StickySessionCookieTTL = cookieTTL
+
+	changeOnFailure := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-change-on-failure"] != "false"
+	envoyIng.cluster.StickySessionChangeOnFailure = &changeOnFailure
 }
 
 func (envoyIng *envoyIngress) addRetryOn(ingress *k8s.Ingress) {

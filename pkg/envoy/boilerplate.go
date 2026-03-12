@@ -468,18 +468,21 @@ func makeHealthChecks(upstreamVHost string, healthPath string, config UpstreamHe
 	return healthChecks
 }
 
-func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPercentage int32, addresses []*core.Address) *v3cluster.Cluster {
+func makeCluster(c cluster, caBytes []byte, healthCfg UpstreamHealthCheck, outlierPercentage int32, addresses []*core.Address) *v3cluster.Cluster {
 
 	tls := &auth.UpstreamTlsContext{}
-	if ca != "" {
+	if len(caBytes) > 0 {
 		tls.CommonTlsContext = &auth.CommonTlsContext{
 			ValidationContextType: &auth.CommonTlsContext_ValidationContext{
 				ValidationContext: &auth.CertificateValidationContext{
 					TrustedCa: &core.DataSource{
-						Specifier: &core.DataSource_Filename{Filename: ca},
+						Specifier: &core.DataSource_InlineBytes{InlineBytes: caBytes},
 					},
 				},
 			},
+		}
+		if !strings.HasPrefix(c.VirtualHost, "*.") {
+			tls.Sni = c.VirtualHost
 		}
 	} else {
 		tls = nil
@@ -506,15 +509,22 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 		}
 	}
 
+	commonHttpOpts := &core.HttpProtocolOptions{
+		IdleTimeout:              &duration.Duration{Seconds: 60},
+		MaxConnectionDuration:    &durationpb.Duration{Seconds: 60},
+		MaxRequestsPerConnection: &wrapperspb.UInt32Value{Value: 10000},
+	}
+	upstreamHttpOpts := &core.UpstreamHttpProtocolOptions{
+		AutoSni:           true,
+		AutoSanValidation: true,
+	}
+
 	var httpOptions *envoy_extension_http.HttpProtocolOptions
 	if c.HttpVersion == "1.1" {
 
 		httpOptions = &envoy_extension_http.HttpProtocolOptions{
-			CommonHttpProtocolOptions: &core.HttpProtocolOptions{
-				IdleTimeout:              &duration.Duration{Seconds: 60},
-				MaxConnectionDuration:    &durationpb.Duration{Seconds: 60},
-				MaxRequestsPerConnection: &wrapperspb.UInt32Value{Value: 10000},
-			},
+			CommonHttpProtocolOptions:  commonHttpOpts,
+			UpstreamHttpProtocolOptions: upstreamHttpOpts,
 			UpstreamProtocolOptions: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_{
 				ExplicitHttpConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig{
 					ProtocolConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_HttpProtocolOptions{
@@ -525,11 +535,8 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 		}
 	} else { // TODO be more specific, handle default version
 		httpOptions = &envoy_extension_http.HttpProtocolOptions{
-			CommonHttpProtocolOptions: &core.HttpProtocolOptions{
-				IdleTimeout:              &duration.Duration{Seconds: 60},
-				MaxConnectionDuration:    &durationpb.Duration{Seconds: 60},
-				MaxRequestsPerConnection: &wrapperspb.UInt32Value{Value: 10000},
-			},
+			CommonHttpProtocolOptions:  commonHttpOpts,
+			UpstreamHttpProtocolOptions: upstreamHttpOpts,
 			UpstreamProtocolOptions: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_{
 				ExplicitHttpConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig{
 					ProtocolConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{

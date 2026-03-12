@@ -240,7 +240,7 @@ func main(*cobra.Command, []string) error {
 		c.Certificates[idx].Key = string(keyBytes)
 	}
 	aggregator := k8s.NewAggregator(sources, ctx, c.SyncSecrets)
-	configurator := envoy.NewKubernetesConfigurator(
+	configurator, err := envoy.NewKubernetesConfigurator(
 		viper.GetString("nodeName"),
 		c.Certificates,
 		viper.GetString("trustCA"),
@@ -262,6 +262,9 @@ func main(*cobra.Command, []string) error {
 		envoy.WithTracingProvider(viper.GetString("tracingProvider")),
 		envoy.WithAlpnProtocols(viper.GetStringSlice("alpnProtocols")),
 	)
+	if err != nil {
+		return fmt.Errorf("error creating configurator: %w", err)
+	}
 	configurator.ValidateAndFormatPath()
 	snapshotter := envoy.NewSnapshotter(envoyCache, configurator, aggregator)
 

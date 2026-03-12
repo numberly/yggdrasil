@@ -8,6 +8,8 @@ import (
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	eal "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
+	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	envoy_extension_http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/golang/protobuf/ptypes/duration"
 )
 
@@ -97,6 +99,126 @@ func TestAccessLoggerConfig(t *testing.T) {
 				t.Errorf("Log format map should match configuration")
 			}
 		})
+	}
+}
+
+func TestMakeClusterSNISetForNonWildcard(t *testing.T) {
+	caBytes := []byte("fake-ca-cert")
+	c := cluster{
+		Name:        "example_com",
+		VirtualHost: "example.com",
+		Hosts:       []LBHost{{Host: "10.0.0.1", Weight: 1}},
+		Timeout:     5 * time.Second,
+	}
+	addresses := makeAddresses(c.Hosts, 443)
+	result := makeCluster(c, caBytes, UpstreamHealthCheck{}, -1, addresses)
+
+	if result.TransportSocket == nil {
+		t.Fatal("Expected TransportSocket to be set when caBytes provided")
+	}
+
+	tlsContext := &auth.UpstreamTlsContext{}
+	if err := result.TransportSocket.GetTypedConfig().UnmarshalTo(tlsContext); err != nil {
+		t.Fatalf("Failed to unmarshal UpstreamTlsContext: %s", err)
+	}
+
+	if tlsContext.Sni != "example.com" {
+		t.Errorf("Expected SNI to be 'example.com', got '%s'", tlsContext.Sni)
+	}
+}
+
+func TestMakeClusterSNINotSetForWildcard(t *testing.T) {
+	caBytes := []byte("fake-ca-cert")
+	c := cluster{
+		Name:        "wildcard_example_com",
+		VirtualHost: "*.example.com",
+		Hosts:       []LBHost{{Host: "10.0.0.1", Weight: 1}},
+		Timeout:     5 * time.Second,
+	}
+	addresses := makeAddresses(c.Hosts, 443)
+	result := makeCluster(c, caBytes, UpstreamHealthCheck{}, -1, addresses)
+
+	tlsContext := &auth.UpstreamTlsContext{}
+	if err := result.TransportSocket.GetTypedConfig().UnmarshalTo(tlsContext); err != nil {
+		t.Fatalf("Failed to unmarshal UpstreamTlsContext: %s", err)
+	}
+
+	if tlsContext.Sni != "" {
+		t.Errorf("Expected SNI to be empty for wildcard host, got '%s'", tlsContext.Sni)
+	}
+}
+
+func TestMakeClusterNoTLSWithoutCA(t *testing.T) {
+	c := cluster{
+		Name:        "example_com",
+		VirtualHost: "example.com",
+		Hosts:       []LBHost{{Host: "10.0.0.1", Weight: 1}},
+		Timeout:     5 * time.Second,
+	}
+	addresses := makeAddresses(c.Hosts, 443)
+	result := makeCluster(c, nil, UpstreamHealthCheck{}, -1, addresses)
+
+	if result.TransportSocket != nil {
+		t.Error("Expected TransportSocket to be nil when no caBytes provided")
+	}
+}
+
+func TestMakeClusterAutoSniEnabled(t *testing.T) {
+	c := cluster{
+		Name:        "example_com",
+		VirtualHost: "example.com",
+		Hosts:       []LBHost{{Host: "10.0.0.1", Weight: 1}},
+		Timeout:     5 * time.Second,
+	}
+	addresses := makeAddresses(c.Hosts, 443)
+	result := makeCluster(c, []byte("fake-ca"), UpstreamHealthCheck{}, -1, addresses)
+
+	httpOptionsPb, ok := result.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
+	if !ok {
+		t.Fatal("Expected HttpProtocolOptions in TypedExtensionProtocolOptions")
+	}
+
+	httpOptions := &envoy_extension_http.HttpProtocolOptions{}
+	if err := httpOptionsPb.UnmarshalTo(httpOptions); err != nil {
+		t.Fatalf("Failed to unmarshal HttpProtocolOptions: %s", err)
+	}
+
+	if httpOptions.UpstreamHttpProtocolOptions == nil {
+		t.Fatal("Expected UpstreamHttpProtocolOptions to be set")
+	}
+	if !httpOptions.UpstreamHttpProtocolOptions.AutoSni {
+		t.Error("Expected AutoSni to be true")
+	}
+	if !httpOptions.UpstreamHttpProtocolOptions.AutoSanValidation {
+		t.Error("Expected AutoSanValidation to be true")
+	}
+}
+
+func TestMakeClusterAutoSniWithHTTP2(t *testing.T) {
+	c := cluster{
+		Name:        "example_com",
+		VirtualHost: "example.com",
+		HttpVersion: "2",
+		Hosts:       []LBHost{{Host: "10.0.0.1", Weight: 1}},
+		Timeout:     5 * time.Second,
+	}
+	addresses := makeAddresses(c.Hosts, 443)
+	result := makeCluster(c, []byte("fake-ca"), UpstreamHealthCheck{}, -1, addresses)
+
+	httpOptionsPb := result.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
+	httpOptions := &envoy_extension_http.HttpProtocolOptions{}
+	if err := httpOptionsPb.UnmarshalTo(httpOptions); err != nil {
+		t.Fatalf("Failed to unmarshal HttpProtocolOptions: %s", err)
+	}
+
+	if httpOptions.UpstreamHttpProtocolOptions == nil {
+		t.Fatal("Expected UpstreamHttpProtocolOptions to be set")
+	}
+	if !httpOptions.UpstreamHttpProtocolOptions.AutoSni {
+		t.Error("Expected AutoSni to be true")
+	}
+	if !httpOptions.UpstreamHttpProtocolOptions.AutoSanValidation {
+		t.Error("Expected AutoSanValidation to be true")
 	}
 }
 

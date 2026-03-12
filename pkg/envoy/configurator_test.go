@@ -2,6 +2,8 @@ package envoy
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -269,6 +271,76 @@ func TestGenerateListeners(t *testing.T) {
 				if listener.FilterChains[0].FilterChainMatch == nil {
 					t.Fatalf("Expected filter chain")
 				}
+			}
+		})
+	}
+}
+
+func TestReadCABytes(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T) string
+		wantErr   string
+		checkData func(t *testing.T, data []byte)
+	}{
+		{
+			name: "directory with pem and crt files",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				os.WriteFile(filepath.Join(dir, "ca1.pem"), []byte("PEM1"), 0644)
+				os.WriteFile(filepath.Join(dir, "ca2.crt"), []byte("CRT2"), 0644)
+				os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("skip me"), 0644)
+				os.MkdirAll(filepath.Join(dir, "subdir"), 0755)
+				return dir
+			},
+			checkData: func(t *testing.T, data []byte) {
+				s := string(data)
+				if !strings.Contains(s, "PEM1") || !strings.Contains(s, "CRT2") {
+					t.Errorf("expected concatenated cert contents, got %q", s)
+				}
+				if strings.Contains(s, "skip me") {
+					t.Error("non-cert file content should not be included")
+				}
+			},
+		},
+		{
+			name: "invalid path",
+			setup: func(t *testing.T) string {
+				return "/nonexistent/path/to/ca"
+			},
+			wantErr: "failed to read CA path",
+		},
+		{
+			name: "empty directory",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("not a cert"), 0644)
+				return dir
+			},
+			wantErr: "no .pem or .crt files found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := tt.setup(t)
+			data, err := readCABytes(path)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.checkData != nil {
+				tt.checkData(t, data)
 			}
 		})
 	}

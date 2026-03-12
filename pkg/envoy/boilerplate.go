@@ -481,6 +481,9 @@ func makeCluster(c cluster, caBytes []byte, healthCfg UpstreamHealthCheck, outli
 				},
 			},
 		}
+		if !strings.HasPrefix(c.VirtualHost, "*.") {
+			tls.Sni = c.VirtualHost
+		}
 	} else {
 		tls = nil
 	}
@@ -506,15 +509,22 @@ func makeCluster(c cluster, caBytes []byte, healthCfg UpstreamHealthCheck, outli
 		}
 	}
 
+	commonHttpOpts := &core.HttpProtocolOptions{
+		IdleTimeout:              &duration.Duration{Seconds: 60},
+		MaxConnectionDuration:    &durationpb.Duration{Seconds: 60},
+		MaxRequestsPerConnection: &wrapperspb.UInt32Value{Value: 10000},
+	}
+	upstreamHttpOpts := &core.UpstreamHttpProtocolOptions{
+		AutoSni:           true,
+		AutoSanValidation: true,
+	}
+
 	var httpOptions *envoy_extension_http.HttpProtocolOptions
 	if c.HttpVersion == "1.1" {
 
 		httpOptions = &envoy_extension_http.HttpProtocolOptions{
-			CommonHttpProtocolOptions: &core.HttpProtocolOptions{
-				IdleTimeout:              &duration.Duration{Seconds: 60},
-				MaxConnectionDuration:    &durationpb.Duration{Seconds: 60},
-				MaxRequestsPerConnection: &wrapperspb.UInt32Value{Value: 10000},
-			},
+			CommonHttpProtocolOptions:  commonHttpOpts,
+			UpstreamHttpProtocolOptions: upstreamHttpOpts,
 			UpstreamProtocolOptions: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_{
 				ExplicitHttpConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig{
 					ProtocolConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_HttpProtocolOptions{
@@ -525,11 +535,8 @@ func makeCluster(c cluster, caBytes []byte, healthCfg UpstreamHealthCheck, outli
 		}
 	} else { // TODO be more specific, handle default version
 		httpOptions = &envoy_extension_http.HttpProtocolOptions{
-			CommonHttpProtocolOptions: &core.HttpProtocolOptions{
-				IdleTimeout:              &duration.Duration{Seconds: 60},
-				MaxConnectionDuration:    &durationpb.Duration{Seconds: 60},
-				MaxRequestsPerConnection: &wrapperspb.UInt32Value{Value: 10000},
-			},
+			CommonHttpProtocolOptions:  commonHttpOpts,
+			UpstreamHttpProtocolOptions: upstreamHttpOpts,
 			UpstreamProtocolOptions: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_{
 				ExplicitHttpConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig{
 					ProtocolConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{

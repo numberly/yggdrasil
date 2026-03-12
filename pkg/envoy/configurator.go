@@ -131,7 +131,7 @@ func readCABytes(path string) ([]byte, error) {
 }
 
 // NewKubernetesConfigurator returns a Kubernetes configurator given a lister and ingress class
-func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca string, ingressClasses []string, accessLog string, options ...option) *KubernetesConfigurator {
+func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca string, ingressClasses []string, accessLog string, options ...option) (*KubernetesConfigurator, error) {
 	c := &KubernetesConfigurator{ingressClasses: ingressClasses, nodeID: nodeID, certificates: certificates, accessLog: accessLog}
 	for _, opt := range options {
 		opt(c)
@@ -140,12 +140,12 @@ func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca str
 	if ca != "" {
 		caBytes, err := readCABytes(ca)
 		if err != nil {
-			logrus.Fatalf("failed to read CA certificates: %v", err)
+		 	return nil, fmt.Errorf("failed to read CA certificates: %w", err)
 		}
 		c.trustCABytes = caBytes
 	}
 
-	return c
+	return c, nil
 }
 
 func (c *KubernetesConfigurator) ValidateAndFormatPath() {

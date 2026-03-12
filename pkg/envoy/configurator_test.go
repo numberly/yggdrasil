@@ -65,9 +65,12 @@ func TestGenerate(t *testing.T) {
 		newGenericIngress("wibble", "bibble"),
 	}
 
-	configurator := NewKubernetesConfigurator("a", []Certificate{
+	configurator, err := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*"}, Cert: "b", Key: "c"},
 	}, caFile, []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	snapshot, _ := configurator.Generate(ingresses, []*v1.Secret{})
 
@@ -86,10 +89,13 @@ func TestGenerateMultipleCerts(t *testing.T) {
 		newGenericIngress("foo.internal.api.co.uk", "bibble"),
 	}
 
-	configurator := NewKubernetesConfigurator("a", []Certificate{
+	configurator, err := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
 		{Hosts: []string{"*.internal.api.co.uk"}, Cert: "couk", Key: "couk"},
 	}, caFile, []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {
@@ -113,9 +119,12 @@ func TestGenerateMultipleHosts(t *testing.T) {
 		newGenericIngress("foo.internal.api.co.uk", "bibble"),
 	}
 
-	configurator := NewKubernetesConfigurator("a", []Certificate{
+	configurator, err := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com", "*.internal.api.co.uk"}, Cert: "com", Key: "com"},
 	}, caFile, []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {
@@ -139,9 +148,12 @@ func TestGenerateNoMatchingCert(t *testing.T) {
 		newGenericIngress("foo.internal.api.co.uk", "bibble"),
 	}
 
-	configurator := NewKubernetesConfigurator("a", []Certificate{
+	configurator, err := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
 	}, caFile, []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {
@@ -161,10 +173,13 @@ func TestGenerateIntoTwoCerts(t *testing.T) {
 		newGenericIngress("foo.internal.api.com", "bibble"),
 	}
 
-	configurator := NewKubernetesConfigurator("a", []Certificate{
+	configurator, err := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
 		{Hosts: []string{"*"}, Cert: "all", Key: "all"},
 	}, caFile, []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {
@@ -237,7 +252,10 @@ func TestGenerateListeners(t *testing.T) {
 	}
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			configurator := NewKubernetesConfigurator("a", tc.certs, "", nil, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+			configurator, err := NewKubernetesConfigurator("a", tc.certs, "", nil, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+			if err != nil {
+				t.Fatal(err)
+			}
 			ret, err := configurator.generateListeners(&envoyConfiguration{VirtualHosts: tc.virtualHost})
 			if err != nil {
 				t.Fatalf("Error generating listeners %v", err)

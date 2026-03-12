@@ -124,7 +124,7 @@ func readCABytes(path string) ([]byte, error) {
 	}
 
 	if len(combined) == 0 {
-		logrus.Warnf("no .pem or .crt files found in CA directory %q", path)
+		return nil, fmt.Errorf("no .pem or .crt files found in CA directory %q", path)
 	}
 
 	return combined, nil

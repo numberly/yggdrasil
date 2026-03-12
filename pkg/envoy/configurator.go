@@ -102,7 +102,7 @@ func readCABytes(path string) ([]byte, error) {
 	// If ReadFile failed, try as a directory.
 	entries, dirErr := os.ReadDir(path)
 	if dirErr != nil {
-		return nil, fmt.Errorf("failed to read CA path %q: %w", path, err)
+		return nil, fmt.Errorf("failed to read CA path %q: file error: %v, directory error: %w", path, err, dirErr)
 	}
 
 	var combined []byte

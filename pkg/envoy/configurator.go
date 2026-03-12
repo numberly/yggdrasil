@@ -140,7 +140,7 @@ func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca str
 	if ca != "" {
 		caBytes, err := readCABytes(ca)
 		if err != nil {
-		 	return nil, fmt.Errorf("failed to read CA certificates: %w", err)
+			return nil, fmt.Errorf("failed to read CA certificates: %w", err)
 		}
 		c.trustCABytes = caBytes
 	}

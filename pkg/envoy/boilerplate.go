@@ -468,15 +468,15 @@ func makeHealthChecks(upstreamVHost string, healthPath string, config UpstreamHe
 	return healthChecks
 }
 
-func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPercentage int32, addresses []*core.Address) *v3cluster.Cluster {
+func makeCluster(c cluster, caBytes []byte, healthCfg UpstreamHealthCheck, outlierPercentage int32, addresses []*core.Address) *v3cluster.Cluster {
 
 	tls := &auth.UpstreamTlsContext{}
-	if ca != "" {
+	if len(caBytes) > 0 {
 		tls.CommonTlsContext = &auth.CommonTlsContext{
 			ValidationContextType: &auth.CommonTlsContext_ValidationContext{
 				ValidationContext: &auth.CertificateValidationContext{
 					TrustedCa: &core.DataSource{
-						Specifier: &core.DataSource_Filename{Filename: ca},
+						Specifier: &core.DataSource_InlineBytes{InlineBytes: caBytes},
 					},
 				},
 			},

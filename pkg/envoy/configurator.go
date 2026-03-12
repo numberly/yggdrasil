@@ -2,7 +2,9 @@ package envoy
 
 import (
 	"errors"
+	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -65,7 +67,7 @@ type KubernetesConfigurator struct {
 	syncSecrets                bool
 	accessLog                  string
 	certificates               []Certificate
-	trustCA                    string
+	trustCABytes               []byte
 	upstreamPort               uint32
 	envoyListenPort            uint32
 	envoyListenerIpv4Address   []string
@@ -87,12 +89,62 @@ type KubernetesConfigurator struct {
 	sync.Mutex
 }
 
+// readCABytes reads CA certificate content from a file or directory path.
+// If path is a file, it reads the file directly.
+// If path is a directory, it concatenates all .pem and .crt files found in it.
+func readCABytes(path string) ([]byte, error) {
+	// Try reading as a file first.
+	data, err := os.ReadFile(path)
+	if err == nil {
+		return data, nil
+	}
+
+	// If ReadFile failed, try as a directory.
+	entries, dirErr := os.ReadDir(path)
+	if dirErr != nil {
+		return nil, fmt.Errorf("failed to read CA path %q: %w", path, err)
+	}
+
+	var combined []byte
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext != ".pem" && ext != ".crt" {
+			continue
+		}
+		fullPath := filepath.Join(path, name)
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA file %q: %w", fullPath, err)
+		}
+		combined = append(combined, data...)
+	}
+
+	if len(combined) == 0 {
+		logrus.Warnf("no .pem or .crt files found in CA directory %q", path)
+	}
+
+	return combined, nil
+}
+
 // NewKubernetesConfigurator returns a Kubernetes configurator given a lister and ingress class
 func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca string, ingressClasses []string, accessLog string, options ...option) *KubernetesConfigurator {
-	c := &KubernetesConfigurator{ingressClasses: ingressClasses, nodeID: nodeID, certificates: certificates, trustCA: ca, accessLog: accessLog}
+	c := &KubernetesConfigurator{ingressClasses: ingressClasses, nodeID: nodeID, certificates: certificates, accessLog: accessLog}
 	for _, opt := range options {
 		opt(c)
 	}
+
+	if ca != "" {
+		caBytes, err := readCABytes(ca)
+		if err != nil {
+			logrus.Fatalf("failed to read CA certificates: %v", err)
+		}
+		c.trustCABytes = caBytes
+	}
+
 	return c
 }
 
@@ -327,7 +379,7 @@ func (c *KubernetesConfigurator) generateClusters(config *envoyConfiguration) []
 
 	for _, cluster := range config.Clusters {
 		addresses := makeAddresses(cluster.Hosts, c.upstreamPort)
-		cluster := makeCluster(*cluster, c.trustCA, c.upstreamHealthCheck, c.outlierPercentage, addresses)
+		cluster := makeCluster(*cluster, c.trustCABytes, c.upstreamHealthCheck, c.outlierPercentage, addresses)
 		clusters = append(clusters, cluster)
 	}
 

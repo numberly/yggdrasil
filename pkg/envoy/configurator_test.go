@@ -1,6 +1,7 @@
 package envoy
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -10,6 +11,19 @@ import (
 	"github.com/uswitch/yggdrasil/pkg/k8s"
 	v1 "k8s.io/api/core/v1"
 )
+
+func createTempCAFile(t *testing.T) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "ca-*.pem")
+	if err != nil {
+		t.Fatalf("failed to create temp CA file: %v", err)
+	}
+	if _, err := f.WriteString("-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n"); err != nil {
+		t.Fatalf("failed to write temp CA file: %v", err)
+	}
+	f.Close()
+	return f.Name()
+}
 
 func assertNumberOfVirtualHosts(t *testing.T, filterChain *listener.FilterChain, expected int) {
 	filter, err := filterChain.Filters[0].GetTypedConfig().UnmarshalNew()
@@ -46,13 +60,14 @@ func assertServerNames(t *testing.T, filterChain *listener.FilterChain, expected
 }
 
 func TestGenerate(t *testing.T) {
+	caFile := createTempCAFile(t)
 	ingresses := []*k8s.Ingress{
 		newGenericIngress("wibble", "bibble"),
 	}
 
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*"}, Cert: "b", Key: "c"},
-	}, "d", []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+	}, caFile, []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
 
 	snapshot, _ := configurator.Generate(ingresses, []*v1.Secret{})
 
@@ -65,6 +80,7 @@ func TestGenerate(t *testing.T) {
 }
 
 func TestGenerateMultipleCerts(t *testing.T) {
+	caFile := createTempCAFile(t)
 	ingresses := []*k8s.Ingress{
 		newGenericIngress("foo.internal.api.com", "bibble"),
 		newGenericIngress("foo.internal.api.co.uk", "bibble"),
@@ -73,7 +89,7 @@ func TestGenerateMultipleCerts(t *testing.T) {
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
 		{Hosts: []string{"*.internal.api.co.uk"}, Cert: "couk", Key: "couk"},
-	}, "d", []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+	}, caFile, []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {
@@ -91,6 +107,7 @@ func TestGenerateMultipleCerts(t *testing.T) {
 }
 
 func TestGenerateMultipleHosts(t *testing.T) {
+	caFile := createTempCAFile(t)
 	ingresses := []*k8s.Ingress{
 		newGenericIngress("foo.internal.api.com", "bibble"),
 		newGenericIngress("foo.internal.api.co.uk", "bibble"),
@@ -98,7 +115,7 @@ func TestGenerateMultipleHosts(t *testing.T) {
 
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com", "*.internal.api.co.uk"}, Cert: "com", Key: "com"},
-	}, "d", []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+	}, caFile, []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {
@@ -116,6 +133,7 @@ func TestGenerateMultipleHosts(t *testing.T) {
 }
 
 func TestGenerateNoMatchingCert(t *testing.T) {
+	caFile := createTempCAFile(t)
 	ingresses := []*k8s.Ingress{
 		newGenericIngress("foo.internal.api.com", "bibble"),
 		newGenericIngress("foo.internal.api.co.uk", "bibble"),
@@ -123,7 +141,7 @@ func TestGenerateNoMatchingCert(t *testing.T) {
 
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
-	}, "d", []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+	}, caFile, []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {
@@ -138,6 +156,7 @@ func TestGenerateNoMatchingCert(t *testing.T) {
 }
 
 func TestGenerateIntoTwoCerts(t *testing.T) {
+	caFile := createTempCAFile(t)
 	ingresses := []*k8s.Ingress{
 		newGenericIngress("foo.internal.api.com", "bibble"),
 	}
@@ -145,7 +164,7 @@ func TestGenerateIntoTwoCerts(t *testing.T) {
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
 		{Hosts: []string{"*"}, Cert: "all", Key: "all"},
-	}, "d", []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+	}, caFile, []string{"bar"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {

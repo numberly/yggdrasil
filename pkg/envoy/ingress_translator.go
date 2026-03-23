@@ -126,9 +126,32 @@ type cluster struct {
 	Timeout                      time.Duration
 	Hosts                        []LBHost
 	StickySessionChangeOnFailure *bool // nil = not set (sticky sessions disabled), false = persist to unhealthy backend
+	IdleTimeout                  *time.Duration
+	MaxConnectionDuration        *time.Duration
+	MaxRequestsPerConnection     *uint32
 }
 
 func boolPtrEqual(a, b *bool) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func durationPtrEqual(a, b *time.Duration) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func uint32PtrEqual(a, b *uint32) bool {
 	if a == nil && b == nil {
 		return true
 	}
@@ -176,6 +199,18 @@ func (c *cluster) Equals(other *cluster) bool {
 	}
 
 	if !boolPtrEqual(c.StickySessionChangeOnFailure, other.StickySessionChangeOnFailure) {
+		return false
+	}
+
+	if !durationPtrEqual(c.IdleTimeout, other.IdleTimeout) {
+		return false
+	}
+
+	if !durationPtrEqual(c.MaxConnectionDuration, other.MaxConnectionDuration) {
+		return false
+	}
+
+	if !uint32PtrEqual(c.MaxRequestsPerConnection, other.MaxRequestsPerConnection) {
 		return false
 	}
 
@@ -558,6 +593,34 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 			if ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"] != "" {
 				// TODO validate, add error path
 				envoyIngress.setUpstreamHttpVersion(ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"])
+			}
+
+			if ingress.Annotations["yggdrasil.uswitch.com/idle-timeout"] != "" {
+				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/idle-timeout"])
+				if err == nil {
+					envoyIngress.cluster.IdleTimeout = &timeout
+				} else {
+					logrus.Warnf("invalid idle-timeout for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
+				}
+			}
+
+			if ingress.Annotations["yggdrasil.uswitch.com/max-connection-duration"] != "" {
+				dur, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/max-connection-duration"])
+				if err == nil {
+					envoyIngress.cluster.MaxConnectionDuration = &dur
+				} else {
+					logrus.Warnf("invalid max-connection-duration for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
+				}
+			}
+
+			if ingress.Annotations["yggdrasil.uswitch.com/max-requests-per-connection"] != "" {
+				val, err := strconv.ParseUint(ingress.Annotations["yggdrasil.uswitch.com/max-requests-per-connection"], 10, 32)
+				if err == nil {
+					v := uint32(val)
+					envoyIngress.cluster.MaxRequestsPerConnection = &v
+				} else {
+					logrus.Warnf("invalid max-requests-per-connection for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
+				}
 			}
 
 			envoyIngress.addRetryOn(ingress)

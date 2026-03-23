@@ -10,6 +10,7 @@ import (
 	eal "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
 	stateful_session "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/stateful_session/v3"
 	cookie_session "github.com/envoyproxy/go-control-plane/envoy/extensions/http/stateful_session/cookie/v3"
+	envoy_extension_http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/golang/protobuf/ptypes/duration"
 )
 
@@ -249,5 +250,102 @@ func TestMakeVirtualHostWithoutStickySession(t *testing.T) {
 
 	if vh.TypedPerFilterConfig != nil {
 		t.Error("expected TypedPerFilterConfig to be nil when sticky session is disabled")
+	}
+}
+
+func TestMakeClusterDefaultHttpProtocolOptions(t *testing.T) {
+	c := cluster{
+		Name:        "test_cluster",
+		VirtualHost: "test.example.com",
+		Timeout:     5 * time.Second,
+		Hosts:       []LBHost{{"host1", 1}},
+	}
+	addresses := []*core.Address{
+		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
+	}
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+
+	anyOpts := result.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
+	if anyOpts == nil {
+		t.Fatal("expected HttpProtocolOptions to be set")
+	}
+
+	opts := &envoy_extension_http.HttpProtocolOptions{}
+	if err := anyOpts.UnmarshalTo(opts); err != nil {
+		t.Fatalf("failed to unmarshal HttpProtocolOptions: %s", err)
+	}
+
+	common := opts.CommonHttpProtocolOptions
+	if common == nil {
+		t.Fatal("expected CommonHttpProtocolOptions to be set")
+	}
+
+	if common.IdleTimeout.Seconds != 55 {
+		t.Errorf("expected default idle_timeout=55s, got %ds", common.IdleTimeout.Seconds)
+	}
+	if common.MaxConnectionDuration.Seconds != 0 {
+		t.Errorf("expected default max_connection_duration=0s (disabled), got %ds", common.MaxConnectionDuration.Seconds)
+	}
+	if common.MaxRequestsPerConnection.Value != 10000 {
+		t.Errorf("expected default max_requests_per_connection=10000, got %d", common.MaxRequestsPerConnection.Value)
+	}
+}
+
+func TestMakeClusterCustomHttpProtocolOptions(t *testing.T) {
+	idleTimeout := 30 * time.Second
+	maxConnDur := 3600 * time.Second
+	maxReqs := uint32(5000)
+
+	c := cluster{
+		Name:                     "test_cluster",
+		VirtualHost:              "test.example.com",
+		Timeout:                  5 * time.Second,
+		Hosts:                    []LBHost{{"host1", 1}},
+		IdleTimeout:              &idleTimeout,
+		MaxConnectionDuration:    &maxConnDur,
+		MaxRequestsPerConnection: &maxReqs,
+	}
+	addresses := []*core.Address{
+		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
+	}
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+
+	anyOpts := result.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
+	opts := &envoy_extension_http.HttpProtocolOptions{}
+	if err := anyOpts.UnmarshalTo(opts); err != nil {
+		t.Fatalf("failed to unmarshal HttpProtocolOptions: %s", err)
+	}
+
+	common := opts.CommonHttpProtocolOptions
+
+	if common.IdleTimeout.Seconds != 30 {
+		t.Errorf("expected idle_timeout=30s, got %ds", common.IdleTimeout.Seconds)
+	}
+	if common.MaxConnectionDuration.Seconds != 3600 {
+		t.Errorf("expected max_connection_duration=3600s, got %ds", common.MaxConnectionDuration.Seconds)
+	}
+	if common.MaxRequestsPerConnection.Value != 5000 {
+		t.Errorf("expected max_requests_per_connection=5000, got %d", common.MaxRequestsPerConnection.Value)
+	}
+}
+
+func TestClusterEqualsWithHttpProtocolOptions(t *testing.T) {
+	idle1 := 30 * time.Second
+	idle2 := 60 * time.Second
+	maxReqs1 := uint32(5000)
+
+	c1 := &cluster{Name: "test", VirtualHost: "test.com", Hosts: []LBHost{}, IdleTimeout: &idle1}
+	c2 := &cluster{Name: "test", VirtualHost: "test.com", Hosts: []LBHost{}, IdleTimeout: &idle1}
+	c3 := &cluster{Name: "test", VirtualHost: "test.com", Hosts: []LBHost{}, IdleTimeout: &idle2}
+	c4 := &cluster{Name: "test", VirtualHost: "test.com", Hosts: []LBHost{}, MaxRequestsPerConnection: &maxReqs1}
+
+	if !c1.Equals(c2) {
+		t.Error("clusters with same IdleTimeout should be equal")
+	}
+	if c1.Equals(c3) {
+		t.Error("clusters with different IdleTimeout should not be equal")
+	}
+	if c1.Equals(c4) {
+		t.Error("clusters with different fields set should not be equal")
 	}
 }

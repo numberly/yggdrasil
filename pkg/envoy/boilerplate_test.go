@@ -280,8 +280,8 @@ func TestMakeClusterDefaultHttpProtocolOptions(t *testing.T) {
 		t.Fatal("expected CommonHttpProtocolOptions to be set")
 	}
 
-	if common.IdleTimeout.Seconds != 55 {
-		t.Errorf("expected default idle_timeout=55s, got %ds", common.IdleTimeout.Seconds)
+	if common.IdleTimeout.Seconds != 60 {
+		t.Errorf("expected default idle_timeout=60s, got %ds", common.IdleTimeout.Seconds)
 	}
 	if common.MaxConnectionDuration.Seconds != 0 {
 		t.Errorf("expected default max_connection_duration=0s (disabled), got %ds", common.MaxConnectionDuration.Seconds)

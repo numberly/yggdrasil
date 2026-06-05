@@ -174,7 +174,7 @@ func TestMakeClusterWithStickySessionOverrideHost(t *testing.T) {
 		Name:                         "test_cluster",
 		VirtualHost:                  "test.example.com",
 		Timeout:                      5 * time.Second,
-		Hosts:                        []LBHost{{"host1", 1}},
+		Hosts:                        []LBHost{{Host: "host1", Weight: 1}},
 		StickySessionChangeOnFailure: boolPtr(false),
 	}
 	addresses := []*core.Address{
@@ -205,7 +205,7 @@ func TestMakeClusterWithoutStickySessionOverrideHost(t *testing.T) {
 		Name:                         "test_cluster",
 		VirtualHost:                  "test.example.com",
 		Timeout:                      5 * time.Second,
-		Hosts:                        []LBHost{{"host1", 1}},
+		Hosts:                        []LBHost{{Host: "host1", Weight: 1}},
 		StickySessionChangeOnFailure: boolPtr(true),
 	}
 	addresses := []*core.Address{
@@ -223,7 +223,7 @@ func TestMakeClusterWithStickySessionNil(t *testing.T) {
 		Name:        "test_cluster",
 		VirtualHost: "test.example.com",
 		Timeout:     5 * time.Second,
-		Hosts:       []LBHost{{"host1", 1}},
+		Hosts:       []LBHost{{Host: "host1", Weight: 1}},
 	}
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
@@ -258,7 +258,7 @@ func TestMakeClusterDefaultHttpProtocolOptions(t *testing.T) {
 		Name:        "test_cluster",
 		VirtualHost: "test.example.com",
 		Timeout:     5 * time.Second,
-		Hosts:       []LBHost{{"host1", 1}},
+		Hosts:       []LBHost{{Host: "host1", Weight: 1}},
 	}
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
@@ -300,7 +300,7 @@ func TestMakeClusterCustomHttpProtocolOptions(t *testing.T) {
 		Name:                     "test_cluster",
 		VirtualHost:              "test.example.com",
 		Timeout:                  5 * time.Second,
-		Hosts:                    []LBHost{{"host1", 1}},
+		Hosts:                    []LBHost{{Host: "host1", Weight: 1}},
 		IdleTimeout:              &idleTimeout,
 		MaxConnectionDuration:    &maxConnDur,
 		MaxRequestsPerConnection: &maxReqs,

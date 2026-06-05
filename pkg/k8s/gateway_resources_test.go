@@ -1,0 +1,578 @@
+package k8s
+
+import (
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+)
+
+func TestConvertGatewayResources(t *testing.T) {
+	listenerHostname := gatewayv1.Hostname("*.example.com")
+	sectionName := gatewayv1.SectionName("web")
+	routeHostname := gatewayv1.Hostname("app.example.com")
+
+	result, err := ConvertGatewayResources(GatewayStores{
+		GatewayClasses: testStore(&gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "public"}}),
+		Gateways: testStore(&gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "gateway-system"},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: gatewayv1.ObjectName("public"),
+				Listeners: []gatewayv1.Listener{
+					{
+						Name:     sectionName,
+						Hostname: &listenerHostname,
+						Port:     gatewayv1.PortNumber(443),
+						Protocol: gatewayv1.HTTPSProtocolType,
+						AllowedRoutes: &gatewayv1.AllowedRoutes{
+							Namespaces: &gatewayv1.RouteNamespaces{From: fromNamespacesPtr(gatewayv1.NamespacesFromAll)},
+						},
+						TLS: &gatewayv1.ListenerTLSConfig{
+							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: gatewayv1.ObjectName("edge-cert")}},
+						},
+					},
+				},
+			},
+		}),
+		HTTPRoutes: testStore(&gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "app",
+				Namespace:   "apps",
+				Annotations: map[string]string{"yggdrasil.uswitch.com/timeout": "2s"},
+			},
+			Spec: gatewayv1.HTTPRouteSpec{
+				CommonRouteSpec: gatewayv1.CommonRouteSpec{
+					ParentRefs: []gatewayv1.ParentReference{{
+						Name:        gatewayv1.ObjectName("edge"),
+						Namespace:   namespacePtr("gateway-system"),
+						SectionName: &sectionName,
+					}},
+				},
+				Hostnames: []gatewayv1.Hostname{routeHostname, gatewayv1.Hostname("other.test")},
+			},
+		}),
+		Services: testStore(&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "envoy", Namespace: "gateway-system"},
+			Spec: corev1.ServiceSpec{
+				ExternalIPs: []string{"10.0.0.1"},
+				Ports: []corev1.ServicePort{{Name: "http", Port: 80}, {Name: "https", Port: 443}},
+			},
+			Status: corev1.ServiceStatus{
+				LoadBalancer: corev1.LoadBalancerStatus{
+					Ingress: []corev1.LoadBalancerIngress{{IP: "10.0.0.2"}, {Hostname: "lb.example.net"}},
+				},
+			},
+		}),
+		Maintenance: true,
+		ClusterName: "cluster-a",
+		ClassConfigs: []GatewayClassConfig{{
+			Name:             "public",
+			ServiceNamespace: "gateway-system",
+			ServiceName:      "envoy",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Routes) != 1 {
+		t.Fatalf("expected one Gateway-derived route, got %d", len(result.Routes))
+	}
+
+	route := result.Routes[0]
+	if route.Source.Kind != "HTTPRoute" || route.Source.Namespace != "apps" || route.Source.Name != "app" || route.Source.Class != "public" || route.Source.KubernetesClusterName != "cluster-a" {
+		t.Fatalf("unexpected route source: %+v", route.Source)
+	}
+	if !route.Maintenance {
+		t.Fatal("expected maintenance mode to propagate")
+	}
+	if !testEq(route.RulesHosts, []string{"app.example.com"}) {
+		t.Fatalf("unexpected hosts: %+v", route.RulesHosts)
+	}
+	expectedUpstreams := []UpstreamEndpoint{
+		{Host: "10.0.0.1", Port: 443},
+		{Host: "10.0.0.2", Port: 443},
+		{Host: "lb.example.net", Port: 443},
+	}
+	if len(route.UpstreamEndpoints) != len(expectedUpstreams) {
+		t.Fatalf("unexpected upstreams: %+v", route.UpstreamEndpoints)
+	}
+	for i := range expectedUpstreams {
+		if route.UpstreamEndpoints[i] != expectedUpstreams[i] {
+			t.Fatalf("unexpected upstream %d: %+v", i, route.UpstreamEndpoints[i])
+		}
+	}
+	if route.TLS["app.example.com"].SecretName != "edge-cert" {
+		t.Fatalf("unexpected TLS map: %+v", route.TLS)
+	}
+	if route.TLS["app.example.com"].SecretNamespace != "gateway-system" {
+		t.Fatalf("expected Gateway namespace for TLS secret, got %+v", route.TLS["app.example.com"])
+	}
+}
+
+func TestConvertGatewayResourcesHonorsAllowedRoutesNamespaces(t *testing.T) {
+	hostname := gatewayv1.Hostname("app.example.com")
+	selectorFrom := gatewayv1.NamespacesFromSelector
+	allFrom := gatewayv1.NamespacesFromAll
+	sameFrom := gatewayv1.NamespacesFromSame
+
+	tests := []struct {
+		name          string
+		routeNS       string
+		allowedRoutes *gatewayv1.AllowedRoutes
+		namespaces    cache.Store
+		wantRoutes    int
+	}{
+		{
+			name:       "default rejects cross namespace",
+			routeNS:    "apps",
+			namespaces: testStore(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps"}}),
+		},
+		{
+			name:    "same rejects cross namespace",
+			routeNS: "apps",
+			allowedRoutes: &gatewayv1.AllowedRoutes{
+				Namespaces: &gatewayv1.RouteNamespaces{From: &sameFrom},
+			},
+			namespaces: testStore(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps"}}),
+		},
+		{
+			name:    "same accepts gateway namespace",
+			routeNS: "gateway-system",
+			allowedRoutes: &gatewayv1.AllowedRoutes{
+				Namespaces: &gatewayv1.RouteNamespaces{From: &sameFrom},
+			},
+			namespaces: testStore(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "gateway-system"}}),
+			wantRoutes: 1,
+		},
+		{
+			name:    "all accepts cross namespace",
+			routeNS: "apps",
+			allowedRoutes: &gatewayv1.AllowedRoutes{
+				Namespaces: &gatewayv1.RouteNamespaces{From: &allFrom},
+			},
+			namespaces: testStore(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps"}}),
+			wantRoutes: 1,
+		},
+		{
+			name:    "selector accepts matching namespace",
+			routeNS: "apps",
+			allowedRoutes: &gatewayv1.AllowedRoutes{
+				Namespaces: &gatewayv1.RouteNamespaces{
+					From:     &selectorFrom,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"gateway-access": "public"}},
+				},
+			},
+			namespaces: testStore(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps", Labels: map[string]string{"gateway-access": "public"}}}),
+			wantRoutes: 1,
+		},
+		{
+			name:    "selector rejects non matching namespace",
+			routeNS: "apps",
+			allowedRoutes: &gatewayv1.AllowedRoutes{
+				Namespaces: &gatewayv1.RouteNamespaces{
+					From:     &selectorFrom,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"gateway-access": "public"}},
+				},
+			},
+			namespaces: testStore(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps", Labels: map[string]string{"gateway-access": "private"}}}),
+		},
+		{
+			name:    "selector rejects missing namespace",
+			routeNS: "apps",
+			allowedRoutes: &gatewayv1.AllowedRoutes{
+				Namespaces: &gatewayv1.RouteNamespaces{
+					From:     &selectorFrom,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"gateway-access": "public"}},
+				},
+			},
+			namespaces: testStore(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ConvertGatewayResources(GatewayStores{
+				GatewayClasses: testStore(&gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "public"}}),
+				Gateways: testStore(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "gateway-system"},
+					Spec: gatewayv1.GatewaySpec{
+						GatewayClassName: gatewayv1.ObjectName("public"),
+						Listeners: []gatewayv1.Listener{{
+							Name:          gatewayv1.SectionName("web"),
+							Hostname:      &hostname,
+							Port:          gatewayv1.PortNumber(80),
+							Protocol:      gatewayv1.HTTPProtocolType,
+							AllowedRoutes: tt.allowedRoutes,
+						}},
+					},
+				}),
+				HTTPRoutes: testStore(&gatewayv1.HTTPRoute{
+					ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: tt.routeNS},
+					Spec: gatewayv1.HTTPRouteSpec{
+						CommonRouteSpec: gatewayv1.CommonRouteSpec{
+							ParentRefs: []gatewayv1.ParentReference{{
+								Name:      gatewayv1.ObjectName("edge"),
+								Namespace: namespacePtr("gateway-system"),
+							}},
+						},
+						Hostnames: []gatewayv1.Hostname{hostname},
+					},
+				}),
+				Services: testStore(&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{Name: "envoy", Namespace: "gateway-system"},
+					Spec: corev1.ServiceSpec{
+						ExternalIPs: []string{"10.0.0.1"},
+						Ports:       []corev1.ServicePort{{Port: 80}},
+					},
+				}),
+				Namespaces: tt.namespaces,
+				ClassConfigs: []GatewayClassConfig{{
+					Name:             "public",
+					ServiceNamespace: "gateway-system",
+					ServiceName:      "envoy",
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Routes) != tt.wantRoutes {
+				t.Fatalf("expected %d routes, got %d: %+v", tt.wantRoutes, len(result.Routes), result.Routes)
+			}
+		})
+	}
+}
+
+func TestGatewayListenerTLSHonorsCertificateRefNamespace(t *testing.T) {
+	hostname := "app.example.com"
+	gateway := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "gateway-system"}}
+	listener := gatewayv1.Listener{
+		TLS: &gatewayv1.ListenerTLSConfig{
+			CertificateRefs: []gatewayv1.SecretObjectReference{{
+				Name:      gatewayv1.ObjectName("edge-cert"),
+				Namespace: namespacePtr("cert-system"),
+			}},
+		},
+	}
+
+	tls := gatewayListenerTLS(gateway, listener, []string{hostname})
+
+	if tls[hostname].SecretName != "edge-cert" {
+		t.Fatalf("expected SecretName edge-cert, got %+v", tls[hostname])
+	}
+	if tls[hostname].SecretNamespace != "cert-system" {
+		t.Fatalf("expected SecretNamespace cert-system, got %+v", tls[hostname])
+	}
+}
+
+func TestConvertGatewayResourcesDropsSameKindPolicyConflicts(t *testing.T) {
+	hostname := gatewayv1.Hostname("app.example.com")
+
+	result, err := ConvertGatewayResources(GatewayStores{
+		GatewayClasses: testStore(&gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "public"}}),
+		Gateways: testStore(&gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "apps"},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: gatewayv1.ObjectName("public"),
+				Listeners: []gatewayv1.Listener{{
+					Name:     gatewayv1.SectionName("web"),
+					Hostname: &hostname,
+					Port:     gatewayv1.PortNumber(80),
+					Protocol: gatewayv1.HTTPProtocolType,
+				}},
+			},
+		}),
+		HTTPRoutes: testStore(
+			gatewayHTTPRoute("one", "1s", hostname),
+			gatewayHTTPRoute("two", "2s", hostname),
+		),
+		Services: testStore(&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "envoy", Namespace: "apps"},
+			Spec: corev1.ServiceSpec{
+				ExternalIPs: []string{"10.0.0.1"},
+				Ports:       []corev1.ServicePort{{Port: 80}},
+			},
+		}),
+		ClassConfigs: []GatewayClassConfig{{
+			Name:             "public",
+			ServiceNamespace: "apps",
+			ServiceName:      "envoy",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Routes) != 0 {
+		t.Fatalf("expected conflicted host to be dropped, got %+v", result.Routes)
+	}
+	if len(result.Diagnostics) == 0 {
+		t.Fatal("expected a diagnostic for same-kind policy conflict")
+	}
+}
+
+func TestAnnotationPolicySignatureIgnoresWeight(t *testing.T) {
+	first := annotationPolicySignature(map[string]string{
+		"yggdrasil.uswitch.com/timeout": "2s",
+		"yggdrasil.uswitch.com/weight":  "2",
+	})
+	second := annotationPolicySignature(map[string]string{
+		"yggdrasil.uswitch.com/timeout": "2s",
+		"yggdrasil.uswitch.com/weight":  "3",
+	})
+
+	if first != second {
+		t.Fatalf("expected weight-only differences to be ignored, got %q and %q", first, second)
+	}
+}
+
+func gatewayHTTPRoute(name, timeout string, hostname gatewayv1.Hostname) *gatewayv1.HTTPRoute {
+	return &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   "apps",
+			Annotations: map[string]string{"yggdrasil.uswitch.com/timeout": timeout},
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: gatewayv1.ObjectName("edge")}},
+			},
+			Hostnames: []gatewayv1.Hostname{hostname},
+		},
+	}
+}
+
+func TestConvertGatewayResourcesEnforcesReferenceGrant(t *testing.T) {
+	hostname := gatewayv1.Hostname("app.example.com")
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "gateway-system"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: gatewayv1.ObjectName("public"),
+			Listeners: []gatewayv1.Listener{{
+				Name:     gatewayv1.SectionName("web"),
+				Hostname: &hostname,
+				Port:     gatewayv1.PortNumber(443),
+				Protocol: gatewayv1.HTTPSProtocolType,
+				AllowedRoutes: &gatewayv1.AllowedRoutes{
+					Namespaces: &gatewayv1.RouteNamespaces{From: fromNamespacesPtr(gatewayv1.NamespacesFromAll)},
+				},
+				TLS: &gatewayv1.ListenerTLSConfig{
+					CertificateRefs: []gatewayv1.SecretObjectReference{{
+						Name:      gatewayv1.ObjectName("edge-cert"),
+						Namespace: namespacePtr("cert-system"),
+					}},
+				},
+			}},
+		},
+	}
+
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "apps"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{
+					Name:      gatewayv1.ObjectName("edge"),
+					Namespace: namespacePtr("gateway-system"),
+				}},
+			},
+			Hostnames: []gatewayv1.Hostname{hostname},
+		},
+	}
+
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "envoy", Namespace: "gateway-system"},
+		Spec: corev1.ServiceSpec{
+			ExternalIPs: []string{"10.0.0.1"},
+			Ports:       []corev1.ServicePort{{Port: 443}},
+		},
+	}
+	classConfigs := []GatewayClassConfig{{Name: "public", ServiceNamespace: "gateway-system", ServiceName: "envoy"}}
+	gatewayClasses := testStore(&gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "public"}})
+
+	secretName := gatewayv1.ObjectName("edge-cert")
+	wrongName := gatewayv1.ObjectName("other-cert")
+
+	tests := []struct {
+		name       string
+		grants     cache.Store
+		wantRoutes int
+		wantDeny   bool
+	}{
+		{
+			name:     "no grant denies",
+			grants:   testStore(),
+			wantDeny: true,
+		},
+		{
+			name: "matching grant any-name permits",
+			grants: testStore(referenceGrant("allow", "cert-system",
+				[]gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "Gateway", Namespace: "gateway-system"}},
+				[]gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Secret"}})),
+			wantRoutes: 1,
+		},
+		{
+			name: "matching grant exact name permits",
+			grants: testStore(referenceGrant("allow", "cert-system",
+				[]gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "Gateway", Namespace: "gateway-system"}},
+				[]gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Secret", Name: &secretName}})),
+			wantRoutes: 1,
+		},
+		{
+			name: "grant naming different secret denies",
+			grants: testStore(referenceGrant("allow", "cert-system",
+				[]gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "Gateway", Namespace: "gateway-system"}},
+				[]gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Secret", Name: &wrongName}})),
+			wantDeny: true,
+		},
+		{
+			name: "grant from wrong namespace denies",
+			grants: testStore(referenceGrant("allow", "cert-system",
+				[]gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "Gateway", Namespace: "other-system"}},
+				[]gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Secret"}})),
+			wantDeny: true,
+		},
+		{
+			name: "grant from wrong kind denies",
+			grants: testStore(referenceGrant("allow", "cert-system",
+				[]gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Namespace: "gateway-system"}},
+				[]gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Secret"}})),
+			wantDeny: true,
+		},
+		{
+			name: "grant in wrong namespace denies",
+			grants: testStore(referenceGrant("allow", "gateway-system",
+				[]gatewayv1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "Gateway", Namespace: "gateway-system"}},
+				[]gatewayv1.ReferenceGrantTo{{Group: "", Kind: "Secret"}})),
+			wantDeny: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ConvertGatewayResources(GatewayStores{
+				GatewayClasses:  gatewayClasses,
+				Gateways:        testStore(gateway),
+				HTTPRoutes:      testStore(route),
+				ReferenceGrants: tt.grants,
+				Services:        testStore(service),
+				ClassConfigs:    classConfigs,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Routes) != tt.wantRoutes {
+				t.Fatalf("expected %d routes, got %d", tt.wantRoutes, len(result.Routes))
+			}
+			if tt.wantDeny && len(result.Diagnostics) == 0 {
+				t.Fatal("expected a diagnostic for denied cross-namespace ref")
+			}
+			if !tt.wantDeny && len(result.Diagnostics) != 0 {
+				t.Fatalf("expected no diagnostics, got %+v", result.Diagnostics)
+			}
+		})
+	}
+}
+
+func TestConvertGatewayResourcesAllowsSameNamespaceSecretRef(t *testing.T) {
+	hostname := gatewayv1.Hostname("app.example.com")
+
+	result, err := ConvertGatewayResources(GatewayStores{
+		GatewayClasses: testStore(&gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "public"}}),
+		Gateways: testStore(&gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "gateway-system"},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: gatewayv1.ObjectName("public"),
+				Listeners: []gatewayv1.Listener{{
+					Name:     gatewayv1.SectionName("web"),
+					Hostname: &hostname,
+					Port:     gatewayv1.PortNumber(443),
+					Protocol: gatewayv1.HTTPSProtocolType,
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{From: fromNamespacesPtr(gatewayv1.NamespacesFromAll)},
+					},
+					TLS: &gatewayv1.ListenerTLSConfig{
+						CertificateRefs: []gatewayv1.SecretObjectReference{{
+							Name:      gatewayv1.ObjectName("edge-cert"),
+							Namespace: namespacePtr("gateway-system"),
+						}},
+					},
+				}},
+			},
+		}),
+		HTTPRoutes: testStore(&gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "apps"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				CommonRouteSpec: gatewayv1.CommonRouteSpec{
+					ParentRefs: []gatewayv1.ParentReference{{
+						Name:      gatewayv1.ObjectName("edge"),
+						Namespace: namespacePtr("gateway-system"),
+					}},
+				},
+				Hostnames: []gatewayv1.Hostname{hostname},
+			},
+		}),
+		Services: testStore(&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "envoy", Namespace: "gateway-system"},
+			Spec: corev1.ServiceSpec{
+				ExternalIPs: []string{"10.0.0.1"},
+				Ports:       []corev1.ServicePort{{Port: 443}},
+			},
+		}),
+		// Empty ReferenceGrants store — same-namespace refs must not require a grant.
+		ReferenceGrants: testStore(),
+		ClassConfigs:    []GatewayClassConfig{{Name: "public", ServiceNamespace: "gateway-system", ServiceName: "envoy"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(result.Routes))
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("expected no diagnostics, got %+v", result.Diagnostics)
+	}
+}
+
+func TestListenerSecretRefDenyReasonRejectsNonSecretRefs(t *testing.T) {
+	group := gatewayv1.Group("example.com")
+	kind := gatewayv1.Kind("ConfigMap")
+	gateway := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "gateway-system"}}
+	listener := gatewayv1.Listener{
+		TLS: &gatewayv1.ListenerTLSConfig{
+			CertificateRefs: []gatewayv1.SecretObjectReference{{
+				Group: &group,
+				Kind:  &kind,
+				Name:  gatewayv1.ObjectName("edge-cert"),
+			}},
+		},
+	}
+
+	if denyReason := listenerSecretRefDenyReason(gateway, listener, testStore()); denyReason == "" {
+		t.Fatal("expected non-Secret certificateRef to be denied")
+	}
+}
+
+func referenceGrant(name, namespace string, from []gatewayv1.ReferenceGrantFrom, to []gatewayv1.ReferenceGrantTo) *gatewayv1.ReferenceGrant {
+	return &gatewayv1.ReferenceGrant{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec:       gatewayv1.ReferenceGrantSpec{From: from, To: to},
+	}
+}
+
+func testStore(objects ...interface{}) cache.Store {
+	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	for _, object := range objects {
+		_ = store.Add(object)
+	}
+	return store
+}
+
+func namespacePtr(namespace string) *gatewayv1.Namespace {
+	value := gatewayv1.Namespace(namespace)
+	return &value
+}
+
+func fromNamespacesPtr(from gatewayv1.FromNamespaces) *gatewayv1.FromNamespaces {
+	return &from
+}

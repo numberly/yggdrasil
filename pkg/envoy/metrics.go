@@ -58,7 +58,7 @@ var (
 			Name:      "upstream_info",
 			Help:      "Retrieve information about cluster",
 		},
-		[]string{"envoy_cluster_name", "upstream", "namespace", "ingressclass", "k8s_cluster", "ingress"},
+		[]string{"envoy_cluster_name", "upstream", "namespace", "ingressclass", "k8s_cluster", "source_kind", "ingress"},
 	)
 )
 

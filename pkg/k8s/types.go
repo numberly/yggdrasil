@@ -1,18 +1,23 @@
 package k8s
 
 import kube "k8s.io/client-go/kubernetes"
+import "k8s.io/client-go/rest"
 
 type KubernetesConfig struct {
 	source                *kube.Clientset
+	restConfig            *rest.Config
 	maintenance           bool
 	kubernetesClusterName string
+	gatewayClasses        []GatewayClassConfig
 }
 
-func NewKubernetesConfig(maintenance bool, clientset *kube.Clientset, kubernetesClusterName string) *KubernetesConfig {
+func NewKubernetesConfig(maintenance bool, clientset *kube.Clientset, restConfig *rest.Config, kubernetesClusterName string, gatewayClasses ...GatewayClassConfig) *KubernetesConfig {
 	return &KubernetesConfig{
 		source:                clientset,
+		restConfig:            restConfig,
 		maintenance:           maintenance,
 		kubernetesClusterName: kubernetesClusterName,
+		gatewayClasses:        gatewayClasses,
 	}
 }
 

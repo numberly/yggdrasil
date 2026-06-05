@@ -23,12 +23,13 @@ import (
 )
 
 type clusterConfig struct {
-	APIServer             string `json:"apiServer"`
-	Ca                    string `json:"ca"`
-	Token                 string `json:"token"`
-	TokenPath             string `json:"tokenPath"`
-	Maintenance           bool   `json:"maintenance"`
-	KubernetesClusterName string `json:"kubernetesClusterName"`
+	APIServer             string                   `json:"apiServer"`
+	Ca                    string                   `json:"ca"`
+	Token                 string                   `json:"token"`
+	TokenPath             string                   `json:"tokenPath"`
+	Maintenance           bool                     `json:"maintenance"`
+	KubernetesClusterName string                   `json:"kubernetesClusterName"`
+	GatewayClasses        []k8s.GatewayClassConfig `json:"gatewayClasses"`
 }
 
 type config struct {
@@ -323,7 +324,7 @@ func createSources(clusters []clusterConfig) ([]k8s.KubernetesConfig, error) {
 			return nil, err
 		}
 
-		kubernetesConfig := k8s.NewKubernetesConfig(cluster.Maintenance, clientSet, cluster.KubernetesClusterName)
+		kubernetesConfig := k8s.NewKubernetesConfig(cluster.Maintenance, clientSet, config, cluster.KubernetesClusterName, cluster.GatewayClasses...)
 
 		envoy.KubernetesClusterInMaintenance.WithLabelValues(cluster.APIServer).Set(float64(0))
 
@@ -357,7 +358,7 @@ func configFromKubeConfig(paths []string) ([]k8s.KubernetesConfig, error) {
 			return sources, err
 		}
 
-		kubernetesConfig := k8s.NewKubernetesConfig(false, clientSet, "")
+		kubernetesConfig := k8s.NewKubernetesConfig(false, clientSet, config, "")
 
 		sources = append(sources, *kubernetesConfig)
 	}

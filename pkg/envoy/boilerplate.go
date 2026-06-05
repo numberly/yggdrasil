@@ -473,12 +473,16 @@ func makeAddresses(addresses []LBHost, upstreamPort uint32) []*core.Address {
 
 	envoyAddresses := []*core.Address{}
 	for _, address := range addresses {
+		port := upstreamPort
+		if address.Port != 0 {
+			port = address.Port
+		}
 		envoyAddress := &core.Address{
 			Address: &core.Address_SocketAddress{
 				SocketAddress: &core.SocketAddress{
 					Address: address.Host,
 					PortSpecifier: &core.SocketAddress_PortValue{
-						PortValue: upstreamPort,
+						PortValue: port,
 					},
 				},
 			},
@@ -513,7 +517,7 @@ func makeHealthChecks(upstreamVHost string, healthPath string, config UpstreamHe
 
 func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPercentage int32, addresses []*core.Address) *v3cluster.Cluster {
 
-	tls := &auth.UpstreamTlsContext{}
+	tls := &auth.UpstreamTlsContext{Sni: c.VirtualHost}
 	if ca != "" {
 		tls.CommonTlsContext = &auth.CommonTlsContext{
 			ValidationContextType: &auth.CommonTlsContext_ValidationContext{

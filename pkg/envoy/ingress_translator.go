@@ -22,6 +22,7 @@ type UpstreamInfo struct {
 	Namespace   string
 	Class       string
 	ClusterName string
+	SourceKind  string
 	IngressName string
 }
 
@@ -115,6 +116,7 @@ func (v *virtualHost) Equals(other *virtualHost) bool {
 type LBHost struct {
 	Host   string
 	Weight uint32
+	Port   uint32
 }
 
 type cluster struct {
@@ -215,9 +217,15 @@ func (c *cluster) Equals(other *cluster) bool {
 	}
 
 	sort.Slice(c.Hosts[:], func(i, j int) bool {
+		if c.Hosts[i].Host == c.Hosts[j].Host {
+			return c.Hosts[i].Port < c.Hosts[j].Port
+		}
 		return c.Hosts[i].Host < c.Hosts[j].Host
 	})
 	sort.Slice(other.Hosts[:], func(i, j int) bool {
+		if other.Hosts[i].Host == other.Hosts[j].Host {
+			return other.Hosts[i].Port < other.Hosts[j].Port
+		}
 		return other.Hosts[i].Host < other.Hosts[j].Host
 	})
 
@@ -239,6 +247,10 @@ func (cfg *envoyConfiguration) equals(oldCfg *envoyConfiguration) (vmatch bool, 
 
 func classFilter(ingresses []*k8s.Ingress, ingressClass []string) (is []*k8s.Ingress) {
 	for _, i := range ingresses {
+		if i.Source.Kind == "HTTPRoute" {
+			is = append(is, i)
+			continue
+		}
 		for _, class := range ingressClass {
 			if i.Annotations["kubernetes.io/ingress.class"] == class ||
 				(i.Class != nil && *i.Class == class) {
@@ -296,21 +308,21 @@ func newEnvoyIngress(host string, timeouts DefaultTimeouts) *envoyIngress {
 	}
 }
 
-func (ing *envoyIngress) addUpstream(host string, weight uint32) {
+func (ing *envoyIngress) addUpstream(host string, port uint32, weight uint32) {
 	// Check if the host is already in the list
 	// If we wan't to avoid using a for loop, maybe we could implement a Map for a faster lookup.
 	// time complexity O(1) vs 0(n) for each iteration.
 	for _, h := range ing.cluster.Hosts {
-		if h.Host == host {
+		if h.Host == host && h.Port == port {
 			// Host found, so we don't add the duplicate
-			logrus.Debugf("Duplicate host found for upstream, not adding : %s for cluster : %s", host, ing.cluster.Name)
+			logrus.Debugf("Duplicate host found for upstream, not adding : %s:%d for cluster : %s", host, port, ing.cluster.Name)
 			return
 		}
 	}
 
 	// No duplicate found, append the new host
-	ing.cluster.Hosts = append(ing.cluster.Hosts, LBHost{Host: host, Weight: weight})
-	logrus.Debugf("Host added on upstream list : %s for cluster : %s", host, ing.cluster.Name)
+	ing.cluster.Hosts = append(ing.cluster.Hosts, LBHost{Host: host, Port: port, Weight: weight})
+	logrus.Debugf("Host added on upstream list : %s:%d for cluster : %s", host, port, ing.cluster.Name)
 }
 
 func (ing *envoyIngress) addHealthCheckPath(path string) {
@@ -371,13 +383,17 @@ func getHostTlsSecret(ingress *k8s.Ingress, host string, secrets []*v1.Secret) (
 	for _, tls := range ingress.TLS {
 		// TODO prefer a.a.b tls secret over *.a.b for host a.a.b when both are configured
 		if hostMatch(host, tls.Host) {
+			secretNamespace := tls.SecretNamespace
+			if secretNamespace == "" {
+				secretNamespace = ingress.Namespace
+			}
 			for _, secret := range secrets {
-				if secret.Namespace == ingress.Namespace &&
+				if secret.Namespace == secretNamespace &&
 					secret.Name == tls.SecretName {
 					return secret, nil
 				}
 			}
-			return nil, fmt.Errorf("secret %s/%s not found for host '%s'", ingress.Namespace, tls.SecretName, host)
+			return nil, fmt.Errorf("secret %s/%s not found for host '%s'", secretNamespace, tls.SecretName, host)
 		}
 	}
 	return nil, fmt.Errorf("ingress %s/%s - %s has no tls secret configured", ingress.Namespace, ingress.Name, host)
@@ -483,6 +499,10 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 	}
 
 	for ruleHost, ingressList := range ruleHostToIngresses {
+		ingressList = filterPolicyConflictsForHost(ruleHost, ingressList)
+		if len(ingressList) == 0 {
+			continue
+		}
 		isWildcard := isWildcard(ruleHost)
 
 		if _, ok := envoyIngresses[ruleHost]; !ok {
@@ -502,13 +522,20 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 
 		// Add upstreams based on maintenance status
 		for _, ingress := range ingressList {
-			for _, j := range ingress.Upstreams {
+			upstreams := ingress.UpstreamEndpoints
+			if len(upstreams) == 0 {
+				for _, upstream := range ingress.Upstreams {
+					upstreams = append(upstreams, k8s.UpstreamEndpoint{Host: upstream})
+				}
+			}
+			for _, upstream := range upstreams {
+				j := upstream.Host
 				// Skip this upstream if cluster is in maintenance but keep it if no other cluster can serve it
 				if !hasNonMaintenance || !ingress.Maintenance {
 					// Check if the upstream is already added
 					exists := false
 					for _, host := range envoyIngress.cluster.Hosts {
-						if host.Host == j {
+						if host.Host == j && host.Port == upstream.Port {
 							exists = true
 							break
 						}
@@ -521,26 +548,31 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 					if ingress.Class != nil {
 						class = *ingress.Class
 					}
+					sourceKind := ingress.Source.Kind
+					if sourceKind == "" {
+						sourceKind = "Ingress"
+					}
 
 					// Add upstream
 					if weight64, err := strconv.ParseUint(ingress.Annotations["yggdrasil.uswitch.com/weight"], 10, 32); err == nil {
 						if weight64 != 0 {
-							envoyIngress.addUpstream(j, uint32(weight64))
+							envoyIngress.addUpstream(j, upstream.Port, uint32(weight64))
 						}
 					} else {
-						envoyIngress.addUpstream(j, 1)
+						envoyIngress.addUpstream(j, upstream.Port, 1)
 					}
-					upstreamKey := fmt.Sprintf("%s-%s", ruleHost, j)
+					upstreamKey := fmt.Sprintf("%s-%s-%d", ruleHost, j, upstream.Port)
 					currentUpstreams[upstreamKey] = UpstreamInfo{
 						RuleHost:    strings.ReplaceAll(ruleHost, ".", "_"),
 						Upstream:    j,
 						Namespace:   ingress.Namespace,
 						Class:       class,
 						ClusterName: ingress.KubernetesClusterName,
+						SourceKind:  sourceKind,
 						IngressName: ingress.Name,
 					}
 
-					EnvoyUpstreamInfo.WithLabelValues(strings.ReplaceAll(ruleHost, ".", "_"), j, ingress.Namespace, class, ingress.KubernetesClusterName, ingress.Name).Set(float64(1))
+					EnvoyUpstreamInfo.WithLabelValues(strings.ReplaceAll(ruleHost, ".", "_"), j, ingress.Namespace, class, ingress.KubernetesClusterName, sourceKind, ingress.Name).Set(float64(1))
 				} else {
 					logrus.Warnf("Endpoint is in maintenance mode, upstream %s will not be added for host %s", j, ruleHost)
 				}
@@ -629,7 +661,7 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 
 			if syncSecrets && envoyIngress.vhost.TlsKey == "" && envoyIngress.vhost.TlsCert == "" {
 				if hostTlsSecret, err := getHostTlsSecret(ingress, ruleHost, secrets); err != nil {
-					logrus.Infof(err.Error())
+					logrus.Infof("%s", err.Error())
 				} else {
 					valid, err := validateTlsSecret(hostTlsSecret)
 					if err != nil {
@@ -646,7 +678,7 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 	// Identify and remove upstreams that no longer exist
 	for upstreamKey, info := range previousUpstreams {
 		if _, exists := currentUpstreams[upstreamKey]; !exists {
-			EnvoyUpstreamInfo.DeleteLabelValues(info.RuleHost, info.Upstream, info.Namespace, info.Class, info.ClusterName, info.IngressName)
+			EnvoyUpstreamInfo.DeleteLabelValues(info.RuleHost, info.Upstream, info.Namespace, info.Class, info.ClusterName, info.SourceKind, info.IngressName)
 		}
 	}
 
@@ -663,4 +695,47 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 	numClusters.Set(float64(len(cfg.Clusters)))
 
 	return cfg
+}
+
+func filterPolicyConflictsForHost(ruleHost string, ingressList []*k8s.Ingress) []*k8s.Ingress {
+	policyByKind := map[string]string{}
+	for _, ingress := range ingressList {
+		kind := ingress.Source.Kind
+		if kind == "" {
+			kind = "Ingress"
+		}
+		signature := policySignature(ingress.Annotations)
+		if previous, ok := policyByKind[kind]; ok && previous != signature {
+			logrus.Warnf("dropping host %s due to same-kind policy conflict for %s", ruleHost, kind)
+			return nil
+		}
+		policyByKind[kind] = signature
+	}
+
+	sort.SliceStable(ingressList, func(i, j int) bool {
+		return sourcePriority(ingressList[i]) < sourcePriority(ingressList[j])
+	})
+	return ingressList
+}
+
+func sourcePriority(ingress *k8s.Ingress) int {
+	if ingress.Source.Kind == "HTTPRoute" {
+		return 1
+	}
+	return 0
+}
+
+func policySignature(annotations map[string]string) string {
+	keys := make([]string, 0, len(annotations))
+	for key := range annotations {
+		if strings.HasPrefix(key, "yggdrasil.uswitch.com/") && key != "yggdrasil.uswitch.com/weight" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+annotations[key])
+	}
+	return strings.Join(parts, "\n")
 }

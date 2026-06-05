@@ -12,6 +12,8 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	gatewayclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
+	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 )
 
 type IngressStore struct {
@@ -24,6 +26,7 @@ type Aggregator struct {
 	factories     []*informers.SharedInformerFactory
 	events        chan SyncDataEvent
 	ingressStores []IngressStore
+	gatewayStores []GatewayStores
 	secretsStore  []cache.Store
 }
 
@@ -51,6 +54,7 @@ func NewAggregator(k8sClients []KubernetesConfig, ctx context.Context, syncSecre
 	a := Aggregator{
 		events:        make(chan SyncDataEvent, watch.DefaultChanSize),
 		ingressStores: []IngressStore{},
+		gatewayStores: []GatewayStores{},
 		secretsStore:  []cache.Store{},
 	}
 	informersSynced := []cache.InformerSynced{}
@@ -71,6 +75,41 @@ func NewAggregator(k8sClients []KubernetesConfig, ctx context.Context, syncSecre
 
 		a.factories = append(a.factories, &factory)
 		informersSynced = append(informersSynced, ingressInformer.HasSynced)
+
+		if len(c.gatewayClasses) > 0 {
+			gatewayClient, err := gatewayclient.NewForConfig(c.restConfig)
+			if err != nil {
+				logrus.Warnf("Gateway API client unavailable for cluster %s: %v", c.kubernetesClusterName, err)
+			} else {
+				gatewayFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, time.Minute)
+				gatewayClassInformer := gatewayFactory.Gateway().V1().GatewayClasses().Informer()
+				gatewayInformer := gatewayFactory.Gateway().V1().Gateways().Informer()
+				httpRouteInformer := gatewayFactory.Gateway().V1().HTTPRoutes().Informer()
+				referenceGrantInformer := gatewayFactory.Gateway().V1().ReferenceGrants().Informer()
+				serviceInformer := factory.Core().V1().Services().Informer()
+				namespaceInformer := factory.Core().V1().Namespaces().Informer()
+
+				a.EventsIngresses(ctx, gatewayClassInformer)
+				a.EventsIngresses(ctx, gatewayInformer)
+				a.EventsIngresses(ctx, httpRouteInformer)
+				a.EventsIngresses(ctx, referenceGrantInformer)
+				a.EventsIngresses(ctx, serviceInformer)
+				a.EventsIngresses(ctx, namespaceInformer)
+
+				a.gatewayStores = append(a.gatewayStores, GatewayStores{
+					GatewayClasses:  gatewayClassInformer.GetStore(),
+					Gateways:        gatewayInformer.GetStore(),
+					HTTPRoutes:      httpRouteInformer.GetStore(),
+					ReferenceGrants: referenceGrantInformer.GetStore(),
+					Services:        serviceInformer.GetStore(),
+					Namespaces:      namespaceInformer.GetStore(),
+					Maintenance:     c.maintenance,
+					ClusterName:     c.kubernetesClusterName,
+					ClassConfigs:    c.gatewayClasses,
+				})
+				informersSynced = append(informersSynced, gatewayClassInformer.HasSynced, gatewayInformer.HasSynced, httpRouteInformer.HasSynced, referenceGrantInformer.HasSynced, serviceInformer.HasSynced, namespaceInformer.HasSynced)
+			}
+		}
 
 		if syncSecrets {
 			tlsFilter := informers.WithTweakListOptions(func(lo *metav1.ListOptions) {

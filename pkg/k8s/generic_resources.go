@@ -5,8 +5,7 @@ import (
 	"reflect"
 	"sort"
 
-	v1 "k8s.io/api/core/v1"
-
+	"github.com/sirupsen/logrus"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	networkingv1 "k8s.io/api/networking/v1"
 	networkingv1beta1 "k8s.io/api/networking/v1beta1"
@@ -20,15 +19,31 @@ type Ingress struct {
 	Annotations           map[string]string
 	RulesHosts            []string
 	Upstreams             []string
+	UpstreamEndpoints     []UpstreamEndpoint
 	TLS                   map[string]*IngressTLS
 	Maintenance           bool
 	KubernetesClusterName string
+	Source                RouteSource
 }
 
 // IngressTLS describes the transport layer security associated with an Ingress.
 type IngressTLS struct {
-	Host       string
-	SecretName string
+	Host            string
+	SecretNamespace string
+	SecretName      string
+}
+
+type UpstreamEndpoint struct {
+	Host string
+	Port uint32
+}
+
+type RouteSource struct {
+	Kind                  string
+	Namespace             string
+	Name                  string
+	Class                 string
+	KubernetesClusterName string
 }
 
 // Get ingresses from stores and convert them to apiGroup-agnostic ingresses
@@ -43,6 +58,17 @@ func (a *Aggregator) GetGenericIngresses() ([]*Ingress, error) {
 			}
 			ing = append(ing, genericIng)
 		}
+	}
+	for _, store := range a.gatewayStores {
+		result, err := ConvertGatewayResources(store)
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range result.Diagnostics {
+			logrus.Warnf("gateway diagnostic: cluster=%s host=%s source=%s/%s/%s reason=%s",
+				store.ClusterName, d.Host, d.Source.Kind, d.Source.Namespace, d.Source.Name, d.Reason)
+		}
+		ing = append(ing, result.Routes...)
 	}
 	return ing, nil
 }
@@ -86,7 +112,7 @@ func convertExtensionsv1beta1Ingress(i *extensionsv1beta1.Ingress, maintenance b
 			}
 			return
 		}(&i.Spec.Rules),
-		Upstreams: func(i *[]v1.LoadBalancerIngress) (upstreams []string) {
+		Upstreams: func(i *[]extensionsv1beta1.IngressLoadBalancerIngress) (upstreams []string) {
 			for _, j := range *i {
 				if j.Hostname != "" {
 					upstreams = append(upstreams, j.Hostname)
@@ -101,8 +127,9 @@ func convertExtensionsv1beta1Ingress(i *extensionsv1beta1.Ingress, maintenance b
 			for _, t := range itls {
 				for _, h := range t.Hosts {
 					tls[h] = &IngressTLS{
-						Host:       h,
-						SecretName: t.SecretName,
+						Host:            h,
+						SecretNamespace: i.Namespace,
+						SecretName:      t.SecretName,
 					}
 				}
 			}
@@ -110,6 +137,13 @@ func convertExtensionsv1beta1Ingress(i *extensionsv1beta1.Ingress, maintenance b
 		}(i.Spec.TLS),
 		Maintenance:           maintenance,
 		KubernetesClusterName: kubernetesClusterName,
+		Source: RouteSource{
+			Kind:                  "Ingress",
+			Namespace:             i.Namespace,
+			Name:                  i.Name,
+			Class:                 stringValue(i.Spec.IngressClassName),
+			KubernetesClusterName: kubernetesClusterName,
+		},
 	}
 }
 
@@ -125,7 +159,7 @@ func convertNetworkingv1beta1Ingress(i *networkingv1beta1.Ingress, maintenance b
 			}
 			return
 		}(&i.Spec.Rules),
-		Upstreams: func(i *[]v1.LoadBalancerIngress) (upstreams []string) {
+		Upstreams: func(i *[]networkingv1beta1.IngressLoadBalancerIngress) (upstreams []string) {
 			for _, j := range *i {
 				if j.Hostname != "" {
 					upstreams = append(upstreams, j.Hostname)
@@ -140,8 +174,9 @@ func convertNetworkingv1beta1Ingress(i *networkingv1beta1.Ingress, maintenance b
 			for _, t := range itls {
 				for _, h := range t.Hosts {
 					tls[h] = &IngressTLS{
-						Host:       h,
-						SecretName: t.SecretName,
+						Host:            h,
+						SecretNamespace: i.Namespace,
+						SecretName:      t.SecretName,
 					}
 				}
 			}
@@ -149,6 +184,13 @@ func convertNetworkingv1beta1Ingress(i *networkingv1beta1.Ingress, maintenance b
 		}(i.Spec.TLS),
 		Maintenance:           maintenance,
 		KubernetesClusterName: kubernetesClusterName,
+		Source: RouteSource{
+			Kind:                  "Ingress",
+			Namespace:             i.Namespace,
+			Name:                  i.Name,
+			Class:                 stringValue(i.Spec.IngressClassName),
+			KubernetesClusterName: kubernetesClusterName,
+		},
 	}
 }
 
@@ -164,7 +206,7 @@ func convertNetworkingv1Ingress(i *networkingv1.Ingress, maintenance bool, kuber
 			}
 			return
 		}(&i.Spec.Rules),
-		Upstreams: func(i *[]v1.LoadBalancerIngress) (upstreams []string) {
+		Upstreams: func(i *[]networkingv1.IngressLoadBalancerIngress) (upstreams []string) {
 			for _, j := range *i {
 				if j.Hostname != "" {
 					upstreams = append(upstreams, j.Hostname)
@@ -179,8 +221,9 @@ func convertNetworkingv1Ingress(i *networkingv1.Ingress, maintenance bool, kuber
 			for _, t := range itls {
 				for _, h := range t.Hosts {
 					tls[h] = &IngressTLS{
-						Host:       h,
-						SecretName: t.SecretName,
+						Host:            h,
+						SecretNamespace: i.Namespace,
+						SecretName:      t.SecretName,
 					}
 				}
 			}
@@ -188,6 +231,13 @@ func convertNetworkingv1Ingress(i *networkingv1.Ingress, maintenance bool, kuber
 		}(i.Spec.TLS),
 		Maintenance:           maintenance,
 		KubernetesClusterName: kubernetesClusterName,
+		Source: RouteSource{
+			Kind:                  "Ingress",
+			Namespace:             i.Namespace,
+			Name:                  i.Name,
+			Class:                 stringValue(i.Spec.IngressClassName),
+			KubernetesClusterName: kubernetesClusterName,
+		},
 	}
 }
 
@@ -222,4 +272,11 @@ func deepStringEqualIgnoreOrder(a, b []string) bool {
 	sort.Strings(a)
 	sort.Strings(b)
 	return reflect.DeepEqual(a, b)
+}
+
+func stringValue(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

@@ -103,10 +103,28 @@ metadata:
   namespace: '*'
   name: yggdrasil-read-only
 rules:
-- apiGroups: ["extensions"]
+- apiGroups: ["extensions", "networking.k8s.io"]
   resources: ["ingresses"]
   verbs: ["get", "list", "watch"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gatewayclasses", "gateways", "httproutes", "referencegrants"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["services", "namespaces"]
+  verbs: ["get", "list", "watch"]
 ```
+
+If `syncSecrets` is enabled, add read access to TLS secrets as well:
+
+```yaml
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+```
+
+For Gateway API HTTPS listeners, Yggdrasil currently uses only the first
+`listener.tls.certificateRefs` entry. Additional certificate references are
+ignored and reported as diagnostics.
 
 And apply the following ClusterRoleBinding:
 ```yaml

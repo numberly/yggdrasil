@@ -713,12 +713,13 @@ func filterPolicyConflictsForHost(ruleHost string, ingressList []*k8s.Ingress) [
 	}
 
 	sort.SliceStable(ingressList, func(i, j int) bool {
-		return sourcePriority(ingressList[i]) < sourcePriority(ingressList[j])
+		return policyApplicationPriority(ingressList[i]) < policyApplicationPriority(ingressList[j])
 	})
 	return ingressList
 }
 
-func sourcePriority(ingress *k8s.Ingress) int {
+func policyApplicationPriority(ingress *k8s.Ingress) int {
+	// Gateway API policy is applied after Ingress policy so HTTPRoute annotations win on same-host migrations.
 	if ingress.Source.Kind == "HTTPRoute" {
 		return 1
 	}

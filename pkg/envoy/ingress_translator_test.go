@@ -754,6 +754,39 @@ func newIngressIP(specHost string, loadbalancerHost string) *k8s.Ingress {
 	}
 }
 
+func TestTranslateIngressesAppliesHTTPRoutePolicyAfterIngress(t *testing.T) {
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	ingress := newGenericIngressWithAnnotations("app.com", "ingress-upstream.com", map[string]string{
+		"yggdrasil.uswitch.com/route-timeout": "1s",
+	})
+	httpRoute := newGenericIngressWithAnnotations("app.com", "httproute-upstream.com", map[string]string{
+		"yggdrasil.uswitch.com/route-timeout": "2s",
+	})
+	httpRoute.Source = k8s.RouteSource{Kind: "HTTPRoute"}
+
+	cfg := translateIngresses([]*k8s.Ingress{httpRoute, ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	if len(cfg.VirtualHosts) != 1 {
+		t.Fatalf("expected 1 virtual host, got %d", len(cfg.VirtualHosts))
+	}
+	if cfg.VirtualHosts[0].Timeout != 2*time.Second {
+		t.Fatalf("expected HTTPRoute route timeout to win, got %s", cfg.VirtualHosts[0].Timeout)
+	}
+	if len(cfg.Clusters) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(cfg.Clusters))
+	}
+	hosts := map[string]bool{}
+	for _, host := range cfg.Clusters[0].Hosts {
+		hosts[host.Host] = true
+	}
+	if !hosts["ingress-upstream.com"] || !hosts["httproute-upstream.com"] {
+		t.Fatalf("expected merged upstreams from both sources, got %+v", cfg.Clusters[0].Hosts)
+	}
+}
+
 func TestStickySessionAnnotationParsing(t *testing.T) {
 	ingress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
 		"yggdrasil.uswitch.com/sticky-sessions":            "true",

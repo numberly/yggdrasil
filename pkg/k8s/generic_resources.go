@@ -62,7 +62,8 @@ func (a *Aggregator) GetGenericIngresses() ([]*Ingress, error) {
 	for _, store := range a.gatewayStores {
 		result, err := ConvertGatewayResources(store)
 		if err != nil {
-			return nil, err
+			logrus.Warnf("gateway conversion failed: cluster=%s error=%s", store.ClusterName, err)
+			continue
 		}
 		for _, d := range result.Diagnostics {
 			logrus.Warnf("gateway diagnostic: cluster=%s host=%s source=%s/%s/%s reason=%s",

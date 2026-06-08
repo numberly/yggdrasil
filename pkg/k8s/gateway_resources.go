@@ -119,6 +119,16 @@ func ConvertGatewayResources(stores GatewayStores) (GatewayConversionResult, err
 						}
 						continue
 					}
+					source := RouteSource{
+						Kind:                  "HTTPRoute",
+						Namespace:             route.Namespace,
+						Name:                  route.Name,
+						Class:                 classConfig.Name,
+						KubernetesClusterName: stores.ClusterName,
+					}
+					for _, diagnostic := range listenerCertificateRefDiagnostics(source, listener, hosts) {
+						result.Diagnostics = append(result.Diagnostics, diagnostic)
+					}
 					result.Routes = append(result.Routes, &Ingress{
 						Namespace:             route.Namespace,
 						Name:                  route.Name,
@@ -130,13 +140,7 @@ func ConvertGatewayResources(stores GatewayStores) (GatewayConversionResult, err
 						TLS:                   gatewayListenerTLS(gateway, listener, hosts),
 						Maintenance:           stores.Maintenance,
 						KubernetesClusterName: stores.ClusterName,
-						Source: RouteSource{
-							Kind:                  "HTTPRoute",
-							Namespace:             route.Namespace,
-							Name:                  route.Name,
-							Class:                 classConfig.Name,
-							KubernetesClusterName: stores.ClusterName,
-						},
+						Source:                source,
 					})
 				}
 			}
@@ -348,6 +352,21 @@ func gatewayListenerTLS(gateway *gatewayv1.Gateway, listener gatewayv1.Listener,
 		tls[host] = &IngressTLS{Host: host, SecretNamespace: secretNamespace, SecretName: secretName}
 	}
 	return tls
+}
+
+func listenerCertificateRefDiagnostics(source RouteSource, listener gatewayv1.Listener, hosts []string) []GatewayDiagnostic {
+	if listener.TLS == nil || len(listener.TLS.CertificateRefs) <= 1 {
+		return nil
+	}
+	diagnostics := []GatewayDiagnostic{}
+	for _, host := range hosts {
+		diagnostics = append(diagnostics, GatewayDiagnostic{
+			Host:   host,
+			Source: source,
+			Reason: "multiple certificateRefs configured; only the first certificateRef is used",
+		})
+	}
+	return diagnostics
 }
 
 func resolvePolicyConflicts(result GatewayConversionResult) GatewayConversionResult {

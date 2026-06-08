@@ -57,7 +57,7 @@ func TestConvertGatewayResources(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "envoy", Namespace: "gateway-system"},
 			Spec: corev1.ServiceSpec{
 				ExternalIPs: []string{"10.0.0.1"},
-				Ports: []corev1.ServicePort{{Name: "http", Port: 80}, {Name: "https", Port: 443}},
+				Ports:       []corev1.ServicePort{{Name: "http", Port: 80}, {Name: "https", Port: 443}},
 			},
 			Status: corev1.ServiceStatus{
 				LoadBalancer: corev1.LoadBalancerStatus{
@@ -308,6 +308,71 @@ func TestConvertGatewayResourcesDropsSameKindPolicyConflicts(t *testing.T) {
 	}
 	if len(result.Diagnostics) == 0 {
 		t.Fatal("expected a diagnostic for same-kind policy conflict")
+	}
+}
+
+func TestConvertGatewayResourcesReportsAdditionalCertificateRefs(t *testing.T) {
+	hostname := gatewayv1.Hostname("app.example.com")
+
+	result, err := ConvertGatewayResources(GatewayStores{
+		GatewayClasses: testStore(&gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "public"}}),
+		Gateways: testStore(&gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "gateway-system"},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: gatewayv1.ObjectName("public"),
+				Listeners: []gatewayv1.Listener{{
+					Name:     gatewayv1.SectionName("web"),
+					Hostname: &hostname,
+					Port:     gatewayv1.PortNumber(443),
+					Protocol: gatewayv1.HTTPSProtocolType,
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{From: fromNamespacesPtr(gatewayv1.NamespacesFromAll)},
+					},
+					TLS: &gatewayv1.ListenerTLSConfig{
+						CertificateRefs: []gatewayv1.SecretObjectReference{
+							{Name: gatewayv1.ObjectName("first-cert")},
+							{Name: gatewayv1.ObjectName("second-cert")},
+						},
+					},
+				}},
+			},
+		}),
+		HTTPRoutes: testStore(&gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "apps"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				CommonRouteSpec: gatewayv1.CommonRouteSpec{
+					ParentRefs: []gatewayv1.ParentReference{{
+						Name:      gatewayv1.ObjectName("edge"),
+						Namespace: namespacePtr("gateway-system"),
+					}},
+				},
+				Hostnames: []gatewayv1.Hostname{hostname},
+			},
+		}),
+		Services: testStore(&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "envoy", Namespace: "gateway-system"},
+			Spec: corev1.ServiceSpec{
+				ExternalIPs: []string{"10.0.0.1"},
+				Ports:       []corev1.ServicePort{{Port: 443}},
+			},
+		}),
+		ReferenceGrants: testStore(),
+		ClassConfigs:    []GatewayClassConfig{{Name: "public", ServiceNamespace: "gateway-system", ServiceName: "envoy"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(result.Routes))
+	}
+	if result.Routes[0].TLS["app.example.com"].SecretName != "first-cert" {
+		t.Fatalf("expected first certificate ref to be used, got %+v", result.Routes[0].TLS)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Fatalf("expected certificateRef diagnostic, got %+v", result.Diagnostics)
+	}
+	if result.Diagnostics[0].Reason != "multiple certificateRefs configured; only the first certificateRef is used" {
+		t.Fatalf("unexpected diagnostic: %+v", result.Diagnostics[0])
 	}
 }
 

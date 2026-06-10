@@ -98,18 +98,25 @@ func ConvertGatewayResources(stores GatewayStores) (GatewayConversionResult, err
 					if len(hosts) == 0 {
 						continue
 					}
-					upstreams := gatewayServiceUpstreams(classConfig, listener, serviceByKey)
+					source := RouteSource{
+						Kind:                  "HTTPRoute",
+						Namespace:             route.Namespace,
+						Name:                  route.Name,
+						Class:                 classConfig.Name,
+						KubernetesClusterName: stores.ClusterName,
+					}
+					upstreams := resolveGatewayUpstreams(gateway, listener, classConfig, serviceByKey)
 					if len(upstreams) == 0 {
+						for _, host := range hosts {
+							result.Diagnostics = append(result.Diagnostics, GatewayDiagnostic{
+								Host:   host,
+								Source: source,
+								Reason: fmt.Sprintf("no gateway address found for gateway %s/%s: empty status.addresses, no owned Service, no serviceName configured for class %s", gateway.Namespace, gateway.Name, classConfig.Name),
+							})
+						}
 						continue
 					}
 					if denyReason := listenerSecretRefDenyReason(gateway, listener, stores.ReferenceGrants); denyReason != "" {
-						source := RouteSource{
-							Kind:                  "HTTPRoute",
-							Namespace:             route.Namespace,
-							Name:                  route.Name,
-							Class:                 classConfig.Name,
-							KubernetesClusterName: stores.ClusterName,
-						}
 						for _, host := range hosts {
 							result.Diagnostics = append(result.Diagnostics, GatewayDiagnostic{
 								Host:   host,
@@ -118,13 +125,6 @@ func ConvertGatewayResources(stores GatewayStores) (GatewayConversionResult, err
 							})
 						}
 						continue
-					}
-					source := RouteSource{
-						Kind:                  "HTTPRoute",
-						Namespace:             route.Namespace,
-						Name:                  route.Name,
-						Class:                 classConfig.Name,
-						KubernetesClusterName: stores.ClusterName,
 					}
 					for _, diagnostic := range listenerCertificateRefDiagnostics(source, listener, hosts) {
 						result.Diagnostics = append(result.Diagnostics, diagnostic)
@@ -240,11 +240,67 @@ func hostMatchesGatewayListener(routeHost, listenerHost string) bool {
 	return false
 }
 
+// resolveGatewayUpstreams discovers the Gateway Address (data-plane endpoints) for a
+// listener, in vendor-agnostic precedence order (see docs/adr/0002):
+//  1. Gateway.status.addresses (spec-guaranteed) with the listener port
+//  2. a Service owned by the Gateway (per-Gateway deployments)
+//  3. the static serviceName/serviceNamespace from config.json (escape hatch for
+//     merged/shared deployments whose implementation does not publish status addresses)
+func resolveGatewayUpstreams(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, classConfig GatewayClassConfig, services map[string]*v1.Service) []UpstreamEndpoint {
+	if upstreams := gatewayStatusUpstreams(gateway, listener); len(upstreams) > 0 {
+		return upstreams
+	}
+	if upstreams := ownedServiceUpstreams(gateway, listener, services); len(upstreams) > 0 {
+		return upstreams
+	}
+	return gatewayServiceUpstreams(classConfig, listener, services)
+}
+
+func gatewayStatusUpstreams(gateway *gatewayv1.Gateway, listener gatewayv1.Listener) []UpstreamEndpoint {
+	upstreams := []UpstreamEndpoint{}
+	for _, address := range gateway.Status.Addresses {
+		if address.Value == "" {
+			continue
+		}
+		upstreams = append(upstreams, UpstreamEndpoint{Host: address.Value, Port: uint32(listener.Port)})
+	}
+	return uniqueUpstreams(upstreams)
+}
+
+func ownedServiceUpstreams(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, services map[string]*v1.Service) []UpstreamEndpoint {
+	owned := []*v1.Service{}
+	for _, service := range services {
+		if service.Namespace == gateway.Namespace && isOwnedByGateway(service, gateway) {
+			owned = append(owned, service)
+		}
+	}
+	sort.Slice(owned, func(i, j int) bool { return owned[i].Name < owned[j].Name })
+	for _, service := range owned {
+		if upstreams := serviceUpstreams(service, listener); len(upstreams) > 0 {
+			return upstreams
+		}
+	}
+	return nil
+}
+
+func isOwnedByGateway(service *v1.Service, gateway *gatewayv1.Gateway) bool {
+	for _, owner := range service.OwnerReferences {
+		if owner.Kind == "Gateway" && owner.Name == gateway.Name && strings.HasPrefix(owner.APIVersion, "gateway.networking.k8s.io/") {
+			return true
+		}
+	}
+	return false
+}
+
 func gatewayServiceUpstreams(classConfig GatewayClassConfig, listener gatewayv1.Listener, services map[string]*v1.Service) []UpstreamEndpoint {
 	service := services[namespacedName(classConfig.ServiceNamespace, classConfig.ServiceName)]
 	if service == nil {
 		return nil
 	}
+	return serviceUpstreams(service, listener)
+}
+
+func serviceUpstreams(service *v1.Service, listener gatewayv1.Listener) []UpstreamEndpoint {
 	port := servicePortForListener(service, listener)
 	if port == 0 {
 		return nil

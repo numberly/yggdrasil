@@ -3,6 +3,7 @@ package k8s
 import (
 	"testing"
 
+	"github.com/uswitch/yggdrasil/pkg/policy"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
@@ -376,18 +377,18 @@ func TestConvertGatewayResourcesReportsAdditionalCertificateRefs(t *testing.T) {
 	}
 }
 
-func TestAnnotationPolicySignatureIgnoresWeight(t *testing.T) {
-	first := annotationPolicySignature(map[string]string{
+func TestPolicySignatureIgnoresWeight(t *testing.T) {
+	firstPolicy, _ := policy.ParseAnnotations(map[string]string{
 		"yggdrasil.uswitch.com/timeout": "2s",
 		"yggdrasil.uswitch.com/weight":  "2",
 	})
-	second := annotationPolicySignature(map[string]string{
+	secondPolicy, _ := policy.ParseAnnotations(map[string]string{
 		"yggdrasil.uswitch.com/timeout": "2s",
 		"yggdrasil.uswitch.com/weight":  "3",
 	})
 
-	if first != second {
-		t.Fatalf("expected weight-only differences to be ignored, got %q and %q", first, second)
+	if firstPolicy.Signature() != secondPolicy.Signature() {
+		t.Fatalf("expected weight-only differences to be ignored, got %q and %q", firstPolicy.Signature(), secondPolicy.Signature())
 	}
 }
 

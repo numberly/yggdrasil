@@ -34,7 +34,7 @@ func TestGetGenericIngressesKeepsIngressesWhenGatewayConversionFails(t *testing.
 		}},
 	}
 
-	ingresses, err := aggregator.GetGenericIngresses()
+	ingresses, err := aggregator.GetSourceRoutes()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestCompareConvertedV1V1beta1Ingresses(t *testing.T) {
 		t.Error(err)
 	}
 
-	if !GenericIngressEqual(genv1b1, genv1) {
+	if !SourceRouteEqual(genv1b1, genv1) {
 		t.Error("ingress from v1beta1 not equal to one in v1, expected equality")
 	}
 }

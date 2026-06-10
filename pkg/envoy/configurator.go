@@ -116,7 +116,7 @@ func (c *KubernetesConfigurator) ValidateAndFormatPath() {
 }
 
 // Generate creates a new snapshot
-func (c *KubernetesConfigurator) Generate(ingresses []*k8s.Ingress, secrets []*v1.Secret) (cache.Snapshot, error) {
+func (c *KubernetesConfigurator) Generate(ingresses []*k8s.SourceRoute, secrets []*v1.Secret) (cache.Snapshot, error) {
 	c.Lock()
 	defer c.Unlock()
 

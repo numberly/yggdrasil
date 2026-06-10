@@ -46,7 +46,7 @@ func assertServerNames(t *testing.T, filterChain *listener.FilterChain, expected
 }
 
 func TestGenerate(t *testing.T) {
-	ingresses := []*k8s.Ingress{
+	ingresses := []*k8s.SourceRoute{
 		newGenericIngress("wibble", "bibble"),
 	}
 
@@ -65,7 +65,7 @@ func TestGenerate(t *testing.T) {
 }
 
 func TestGenerateMultipleCerts(t *testing.T) {
-	ingresses := []*k8s.Ingress{
+	ingresses := []*k8s.SourceRoute{
 		newGenericIngress("foo.internal.api.com", "bibble"),
 		newGenericIngress("foo.internal.api.co.uk", "bibble"),
 	}
@@ -91,7 +91,7 @@ func TestGenerateMultipleCerts(t *testing.T) {
 }
 
 func TestGenerateMultipleHosts(t *testing.T) {
-	ingresses := []*k8s.Ingress{
+	ingresses := []*k8s.SourceRoute{
 		newGenericIngress("foo.internal.api.com", "bibble"),
 		newGenericIngress("foo.internal.api.co.uk", "bibble"),
 	}
@@ -116,7 +116,7 @@ func TestGenerateMultipleHosts(t *testing.T) {
 }
 
 func TestGenerateNoMatchingCert(t *testing.T) {
-	ingresses := []*k8s.Ingress{
+	ingresses := []*k8s.SourceRoute{
 		newGenericIngress("foo.internal.api.com", "bibble"),
 		newGenericIngress("foo.internal.api.co.uk", "bibble"),
 	}
@@ -138,7 +138,7 @@ func TestGenerateNoMatchingCert(t *testing.T) {
 }
 
 func TestGenerateIntoTwoCerts(t *testing.T) {
-	ingresses := []*k8s.Ingress{
+	ingresses := []*k8s.SourceRoute{
 		newGenericIngress("foo.internal.api.com", "bibble"),
 	}
 

@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/uswitch/yggdrasil/pkg/apis/yggdrasil/v1alpha1"
+	"github.com/uswitch/yggdrasil/pkg/policy"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -19,15 +21,16 @@ type GatewayClassConfig struct {
 }
 
 type GatewayStores struct {
-	GatewayClasses  cache.Store
-	Gateways        cache.Store
-	HTTPRoutes      cache.Store
-	ReferenceGrants cache.Store
-	Services        cache.Store
-	Namespaces      cache.Store
-	Maintenance     bool
-	ClusterName     string
-	ClassConfigs    []GatewayClassConfig
+	GatewayClasses    cache.Store
+	Gateways          cache.Store
+	HTTPRoutes        cache.Store
+	ReferenceGrants   cache.Store
+	Services          cache.Store
+	Namespaces        cache.Store
+	YggdrasilPolicies cache.Store
+	Maintenance       bool
+	ClusterName       string
+	ClassConfigs      []GatewayClassConfig
 }
 
 type GatewayDiagnostic struct {
@@ -37,7 +40,7 @@ type GatewayDiagnostic struct {
 }
 
 type GatewayConversionResult struct {
-	Routes      []*Ingress
+	Routes      []*SourceRoute
 	Diagnostics []GatewayDiagnostic
 }
 
@@ -79,6 +82,13 @@ func ConvertGatewayResources(stores GatewayStores) (GatewayConversionResult, err
 	}
 
 	result := GatewayConversionResult{}
+
+	policiesByTarget, policyDiagnostics, err := indexPoliciesByTarget(stores.YggdrasilPolicies, stores.ClusterName)
+	if err != nil {
+		return GatewayConversionResult{}, err
+	}
+	result.Diagnostics = append(result.Diagnostics, policyDiagnostics...)
+
 	for _, obj := range storeList(stores.HTTPRoutes) {
 		route, ok := obj.(*gatewayv1.HTTPRoute)
 		if !ok {
@@ -129,7 +139,7 @@ func ConvertGatewayResources(stores GatewayStores) (GatewayConversionResult, err
 					for _, diagnostic := range listenerCertificateRefDiagnostics(source, listener, hosts) {
 						result.Diagnostics = append(result.Diagnostics, diagnostic)
 					}
-					result.Routes = append(result.Routes, &Ingress{
+					sourceRoute := &SourceRoute{
 						Namespace:             route.Namespace,
 						Name:                  route.Name,
 						Class:                 strPtr(classConfig.Name),
@@ -141,7 +151,9 @@ func ConvertGatewayResources(stores GatewayStores) (GatewayConversionResult, err
 						Maintenance:           stores.Maintenance,
 						KubernetesClusterName: stores.ClusterName,
 						Source:                source,
-					})
+					}
+					result.Diagnostics = append(result.Diagnostics, attachPolicyToSourceRoute(sourceRoute, policiesByTarget[namespacedName(route.Namespace, route.Name)])...)
+					result.Routes = append(result.Routes, sourceRoute)
 				}
 			}
 		}
@@ -369,19 +381,95 @@ func listenerCertificateRefDiagnostics(source RouteSource, listener gatewayv1.Li
 	return diagnostics
 }
 
+func indexPoliciesByTarget(store cache.Store, clusterName string) (map[string][]*v1alpha1.YggdrasilPolicy, []GatewayDiagnostic, error) {
+	byTarget := map[string][]*v1alpha1.YggdrasilPolicy{}
+	diagnostics := []GatewayDiagnostic{}
+	for _, obj := range storeList(store) {
+		yggdrasilPolicy, ok := obj.(*v1alpha1.YggdrasilPolicy)
+		if !ok {
+			return nil, nil, fmt.Errorf("unexpected object in yggdrasilpolicy store: %+v", obj)
+		}
+		if err := policy.ValidateTargetRef(yggdrasilPolicy.Spec.TargetRef); err != nil {
+			diagnostics = append(diagnostics, GatewayDiagnostic{
+				Source: RouteSource{
+					Kind:                  "YggdrasilPolicy",
+					Namespace:             yggdrasilPolicy.Namespace,
+					Name:                  yggdrasilPolicy.Name,
+					KubernetesClusterName: clusterName,
+				},
+				Reason: err.Error(),
+			})
+			continue
+		}
+		target := namespacedName(yggdrasilPolicy.Namespace, yggdrasilPolicy.Spec.TargetRef.Name)
+		byTarget[target] = append(byTarget[target], yggdrasilPolicy)
+	}
+	return byTarget, diagnostics, nil
+}
+
+func attachPolicyToSourceRoute(route *SourceRoute, policies []*v1alpha1.YggdrasilPolicy) []GatewayDiagnostic {
+	diagnostics := []GatewayDiagnostic{}
+	diagnose := func(source RouteSource, reason string) {
+		for _, host := range route.RulesHosts {
+			diagnostics = append(diagnostics, GatewayDiagnostic{Host: host, Source: source, Reason: reason})
+		}
+	}
+
+	if len(policies) == 0 {
+		annotationPolicy, annotationDiagnostics := policy.ParseAnnotations(route.Annotations)
+		for _, diagnostic := range annotationDiagnostics {
+			diagnose(route.Source, diagnostic)
+		}
+		route.Annotations = policy.StripAnnotations(route.Annotations)
+		if annotationPolicy != nil {
+			route.Policy = annotationPolicy
+			route.PolicySource = &policy.Source{Kind: "Annotations", Namespace: route.Namespace, Name: route.Name}
+		}
+		return diagnostics
+	}
+
+	route.Annotations = policy.StripAnnotations(route.Annotations)
+
+	if len(policies) > 1 {
+		names := make([]string, 0, len(policies))
+		for _, duplicate := range policies {
+			names = append(names, duplicate.Name)
+		}
+		sort.Strings(names)
+		diagnose(route.Source, fmt.Sprintf("duplicate YggdrasilPolicies target this HTTPRoute (%s); all are ignored", strings.Join(names, ", ")))
+		return diagnostics
+	}
+
+	yggdrasilPolicy := policies[0]
+	policySource := RouteSource{
+		Kind:                  "YggdrasilPolicy",
+		Namespace:             yggdrasilPolicy.Namespace,
+		Name:                  yggdrasilPolicy.Name,
+		KubernetesClusterName: route.KubernetesClusterName,
+	}
+	parsed, err := policy.ParseSpec(yggdrasilPolicy.Spec)
+	if err != nil {
+		diagnose(policySource, fmt.Sprintf("invalid YggdrasilPolicy rejected as a whole: %s", err))
+		return diagnostics
+	}
+	route.Policy = parsed
+	route.PolicySource = &policy.Source{Kind: "YggdrasilPolicy", Namespace: yggdrasilPolicy.Namespace, Name: yggdrasilPolicy.Name}
+	return diagnostics
+}
+
 func resolvePolicyConflicts(result GatewayConversionResult) GatewayConversionResult {
-	byHost := map[string][]*Ingress{}
+	byHost := map[string][]*SourceRoute{}
 	for _, route := range result.Routes {
 		for _, host := range route.RulesHosts {
 			byHost[host] = append(byHost[host], route)
 		}
 	}
 
-	dropped := map[*Ingress]bool{}
+	dropped := map[*SourceRoute]bool{}
 	for host, routes := range byHost {
 		policyBySourceKind := map[string]string{}
 		for _, route := range routes {
-			signature := annotationPolicySignature(route.Annotations)
+			signature := route.Policy.Signature()
 			if previousSignature, ok := policyBySourceKind[route.Source.Kind]; ok && previousSignature != signature {
 				for _, conflicted := range routes {
 					if conflicted.Source.Kind == route.Source.Kind {
@@ -406,21 +494,6 @@ func resolvePolicyConflicts(result GatewayConversionResult) GatewayConversionRes
 	}
 	result.Routes = filtered
 	return result
-}
-
-func annotationPolicySignature(annotations map[string]string) string {
-	keys := make([]string, 0, len(annotations))
-	for key := range annotations {
-		if strings.HasPrefix(key, "yggdrasil.uswitch.com/") && key != "yggdrasil.uswitch.com/weight" {
-			keys = append(keys, key)
-		}
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		parts = append(parts, key+"="+annotations[key])
-	}
-	return strings.Join(parts, "\n")
 }
 
 func upstreamHosts(upstreams []UpstreamEndpoint) []string {

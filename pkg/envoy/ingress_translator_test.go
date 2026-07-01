@@ -429,6 +429,39 @@ func TestGeneratesForMultipleIngressSharingSpecHost(t *testing.T) {
 	}
 }
 
+func TestTranslateIngressesMergesIngressesWithDivergentAnnotations(t *testing.T) {
+	fooIngress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
+		"yggdrasil.uswitch.com/route-timeout": "1s",
+	})
+	barIngress := newGenericIngressWithAnnotations("app.com", "bar.com", map[string]string{
+		"yggdrasil.uswitch.com/route-timeout": "2s",
+	})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{fooIngress, barIngress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+
+	if len(c.VirtualHosts) != 1 {
+		t.Fatalf("expected 1 virtual host, got %d", len(c.VirtualHosts))
+	}
+	if len(c.Clusters) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(c.Clusters))
+	}
+	if len(c.Clusters[0].Hosts) != 2 {
+		t.Fatalf("expected 2 hosts, got %d", len(c.Clusters[0].Hosts))
+	}
+
+	hosts := map[string]bool{}
+	for _, host := range c.Clusters[0].Hosts {
+		hosts[host.Host] = true
+	}
+	if !hosts["foo.com"] || !hosts["bar.com"] {
+		t.Fatalf("expected merged upstreams from both ingresses, got %+v", c.Clusters[0].Hosts)
+	}
+}
+
 func TestGeneratesForWeightedMultipleIngressesSharingSpecHost(t *testing.T) {
 	fooIngress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
 		"yggdrasil.uswitch.com/weight": "2",

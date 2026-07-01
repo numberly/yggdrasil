@@ -499,10 +499,9 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 	}
 
 	for ruleHost, ingressList := range ruleHostToIngresses {
-		ingressList = filterPolicyConflictsForHost(ruleHost, ingressList)
-		if len(ingressList) == 0 {
-			continue
-		}
+		sort.SliceStable(ingressList, func(i, j int) bool {
+			return sourceKindPriority(ingressList[i]) < sourceKindPriority(ingressList[j])
+		})
 		isWildcard := isWildcard(ruleHost)
 
 		if _, ok := envoyIngresses[ruleHost]; !ok {
@@ -697,46 +696,10 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 	return cfg
 }
 
-func filterPolicyConflictsForHost(ruleHost string, ingressList []*k8s.Ingress) []*k8s.Ingress {
-	policyByKind := map[string]string{}
-	for _, ingress := range ingressList {
-		kind := ingress.Source.Kind
-		if kind == "" {
-			kind = "Ingress"
-		}
-		signature := policySignature(ingress.Annotations)
-		if previous, ok := policyByKind[kind]; ok && previous != signature {
-			logrus.Warnf("dropping host %s due to same-kind policy conflict for %s", ruleHost, kind)
-			return nil
-		}
-		policyByKind[kind] = signature
-	}
-
-	sort.SliceStable(ingressList, func(i, j int) bool {
-		return policyApplicationPriority(ingressList[i]) < policyApplicationPriority(ingressList[j])
-	})
-	return ingressList
-}
-
-func policyApplicationPriority(ingress *k8s.Ingress) int {
+func sourceKindPriority(ingress *k8s.Ingress) int {
 	// Gateway API policy is applied after Ingress policy so HTTPRoute annotations win on same-host migrations.
 	if ingress.Source.Kind == "HTTPRoute" {
 		return 1
 	}
 	return 0
-}
-
-func policySignature(annotations map[string]string) string {
-	keys := make([]string, 0, len(annotations))
-	for key := range annotations {
-		if strings.HasPrefix(key, "yggdrasil.uswitch.com/") && key != "yggdrasil.uswitch.com/weight" {
-			keys = append(keys, key)
-		}
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		parts = append(parts, key+"="+annotations[key])
-	}
-	return strings.Join(parts, "\n")
 }

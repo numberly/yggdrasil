@@ -442,7 +442,7 @@ func TestTranslateIngressesMergesIngressesWithDivergentAnnotations(t *testing.T)
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{fooIngress, barIngress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{fooIngress, barIngress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Fatalf("expected 1 virtual host, got %d", len(c.VirtualHosts))

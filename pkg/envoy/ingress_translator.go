@@ -577,6 +577,10 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 				}
 			}
 
+			if ingress.Maintenance && hasNonMaintenance {
+				continue
+			}
+
 			if isWildcard {
 				if ingress.Annotations["yggdrasil.uswitch.com/healthcheck-host"] != "" {
 					envoyIngress.addHealthCheckHost(ingress.Annotations["yggdrasil.uswitch.com/healthcheck-host"])

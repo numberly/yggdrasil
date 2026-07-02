@@ -112,6 +112,28 @@ func TestConvertGatewayResources(t *testing.T) {
 	}
 }
 
+func TestHostMatchesGatewayListenerWildcardMatchesOneLabel(t *testing.T) {
+	tests := []struct {
+		name         string
+		routeHost    string
+		listenerHost string
+		want         bool
+	}{
+		{name: "single label", routeHost: "app.example.com", listenerHost: "*.example.com", want: true},
+		{name: "multiple labels", routeHost: "a.b.example.com", listenerHost: "*.example.com", want: false},
+		{name: "bare suffix", routeHost: "example.com", listenerHost: "*.example.com", want: false},
+		{name: "exact", routeHost: "app.example.com", listenerHost: "app.example.com", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hostMatchesGatewayListener(tt.routeHost, tt.listenerHost); got != tt.want {
+				t.Fatalf("hostMatchesGatewayListener(%q, %q) = %t, want %t", tt.routeHost, tt.listenerHost, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConvertGatewayResourcesHonorsAllowedRoutesNamespaces(t *testing.T) {
 	hostname := gatewayv1.Hostname("app.example.com")
 	selectorFrom := gatewayv1.NamespacesFromSelector
@@ -309,6 +331,54 @@ func TestConvertGatewayResourcesDropsSameKindPolicyConflicts(t *testing.T) {
 	}
 	if len(result.Diagnostics) == 0 {
 		t.Fatal("expected a diagnostic for same-kind policy conflict")
+	}
+}
+
+func TestConvertGatewayResourcesDropsOnlyConflictedHosts(t *testing.T) {
+	aHost := gatewayv1.Hostname("a.example.com")
+	bHost := gatewayv1.Hostname("b.example.com")
+
+	multiHostRoute := gatewayHTTPRoute("one", "1s", aHost)
+	multiHostRoute.Spec.Hostnames = []gatewayv1.Hostname{aHost, bHost}
+
+	result, err := ConvertGatewayResources(GatewayStores{
+		GatewayClasses: testStore(&gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "public"}}),
+		Gateways: testStore(&gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "apps"},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: gatewayv1.ObjectName("public"),
+				Listeners: []gatewayv1.Listener{{
+					Name:     gatewayv1.SectionName("web"),
+					Port:     gatewayv1.PortNumber(80),
+					Protocol: gatewayv1.HTTPProtocolType,
+				}},
+			},
+		}),
+		HTTPRoutes: testStore(
+			multiHostRoute,
+			gatewayHTTPRoute("two", "2s", aHost),
+		),
+		Services: testStore(&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "envoy", Namespace: "apps"},
+			Spec: corev1.ServiceSpec{
+				ExternalIPs: []string{"10.0.0.1"},
+				Ports:       []corev1.ServicePort{{Port: 80}},
+			},
+		}),
+		ClassConfigs: []GatewayClassConfig{{
+			Name:             "public",
+			ServiceNamespace: "apps",
+			ServiceName:      "envoy",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Routes) != 1 {
+		t.Fatalf("expected only the non-conflicted host route to remain, got %+v", result.Routes)
+	}
+	if result.Routes[0].Name != "one" || !testEq(result.Routes[0].RulesHosts, []string{"b.example.com"}) {
+		t.Fatalf("expected route one to keep only b.example.com, got %+v", result.Routes[0])
 	}
 }
 

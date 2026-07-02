@@ -247,7 +247,8 @@ func hostMatchesGatewayListener(routeHost, listenerHost string) bool {
 		return true
 	}
 	if strings.HasPrefix(listenerHost, "*.") {
-		return strings.HasSuffix(routeHost, strings.TrimPrefix(listenerHost, "*"))
+		prefix, ok := strings.CutSuffix(routeHost, strings.TrimPrefix(listenerHost, "*"))
+		return ok && prefix != "" && !strings.Contains(prefix, ".")
 	}
 	return false
 }
@@ -465,7 +466,14 @@ func resolvePolicyConflicts(result GatewayConversionResult) GatewayConversionRes
 		}
 	}
 
-	dropped := map[*SourceRoute]bool{}
+	conflictedHosts := map[*SourceRoute]map[string]bool{}
+	markConflicted := func(route *SourceRoute, host string) {
+		if conflictedHosts[route] == nil {
+			conflictedHosts[route] = map[string]bool{}
+		}
+		conflictedHosts[route][host] = true
+	}
+
 	for host, routes := range byHost {
 		policyBySourceKind := map[string]string{}
 		for _, route := range routes {
@@ -473,7 +481,7 @@ func resolvePolicyConflicts(result GatewayConversionResult) GatewayConversionRes
 			if previousSignature, ok := policyBySourceKind[route.Source.Kind]; ok && previousSignature != signature {
 				for _, conflicted := range routes {
 					if conflicted.Source.Kind == route.Source.Kind {
-						dropped[conflicted] = true
+						markConflicted(conflicted, host)
 					}
 				}
 				result.Diagnostics = append(result.Diagnostics, GatewayDiagnostic{
@@ -488,7 +496,14 @@ func resolvePolicyConflicts(result GatewayConversionResult) GatewayConversionRes
 
 	filtered := result.Routes[:0]
 	for _, route := range result.Routes {
-		if !dropped[route] {
+		keptHosts := route.RulesHosts[:0]
+		for _, host := range route.RulesHosts {
+			if !conflictedHosts[route][host] {
+				keptHosts = append(keptHosts, host)
+			}
+		}
+		route.RulesHosts = keptHosts
+		if len(route.RulesHosts) > 0 {
 			filtered = append(filtered, route)
 		}
 	}

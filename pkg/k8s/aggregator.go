@@ -80,8 +80,9 @@ func NewAggregator(k8sClients []KubernetesConfig, ctx context.Context, syncSecre
 		informersSynced = append(informersSynced, ingressInformer.HasSynced)
 
 		if len(c.gatewayClasses) > 0 {
-			gatewayClient, err := gatewayclient.NewForConfig(c.restConfig)
-			if err != nil {
+			if _, err := c.source.ServerResourcesForGroupVersion("gateway.networking.k8s.io/v1"); err != nil {
+				logrus.Warnf("Gateway API not available in cluster %s, skipping gateway informers: %v", c.kubernetesClusterName, err)
+			} else if gatewayClient, err := gatewayclient.NewForConfig(c.restConfig); err != nil {
 				logrus.Warnf("Gateway API client unavailable for cluster %s: %v", c.kubernetesClusterName, err)
 			} else {
 				gatewayFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, time.Minute)

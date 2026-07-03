@@ -478,6 +478,9 @@ func resolvePolicyConflicts(result GatewayConversionResult) GatewayConversionRes
 		policyBySourceKind := map[string]string{}
 		for _, route := range routes {
 			signature := route.Policy.Signature()
+			if signature == "" {
+				continue
+			}
 			if previousSignature, ok := policyBySourceKind[route.Source.Kind]; ok && previousSignature != signature {
 				for _, conflicted := range routes {
 					if conflicted.Source.Kind == route.Source.Kind {

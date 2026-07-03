@@ -382,6 +382,62 @@ func TestConvertGatewayResourcesDropsOnlyConflictedHosts(t *testing.T) {
 	}
 }
 
+func TestConvertGatewayResourcesKeepsHostWhenSiblingHasNoPolicy(t *testing.T) {
+	hostname := gatewayv1.Hostname("app.example.com")
+
+	noPolicyRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "two", Namespace: "apps"}, // no yggdrasil annotation
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: gatewayv1.ObjectName("edge")}},
+			},
+			Hostnames: []gatewayv1.Hostname{hostname},
+		},
+	}
+
+	result, err := ConvertGatewayResources(GatewayStores{
+		GatewayClasses: testStore(&gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "public"}}),
+		Gateways: testStore(&gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "apps"},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: gatewayv1.ObjectName("public"),
+				Listeners: []gatewayv1.Listener{{
+					Name:     gatewayv1.SectionName("web"),
+					Hostname: &hostname,
+					Port:     gatewayv1.PortNumber(80),
+					Protocol: gatewayv1.HTTPProtocolType,
+				}},
+			},
+		}),
+		HTTPRoutes: testStore(
+			gatewayHTTPRoute("one", "1s", hostname), // has a policy
+			noPolicyRoute,                            // has none
+		),
+		Services: testStore(&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "envoy", Namespace: "apps"},
+			Spec: corev1.ServiceSpec{
+				ExternalIPs: []string{"10.0.0.1"},
+				Ports:       []corev1.ServicePort{{Port: 80}},
+			},
+		}),
+		ClassConfigs: []GatewayClassConfig{{
+			Name: "public", ServiceNamespace: "apps", ServiceName: "envoy",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both routes keep the shared host; the policy-less sibling must not trigger a conflict.
+	if len(result.Routes) != 2 {
+		t.Fatalf("expected both routes retained, got %+v", result.Routes)
+	}
+	for _, r := range result.Routes {
+		if !testEq(r.RulesHosts, []string{"app.example.com"}) {
+			t.Fatalf("route %s lost its host: %+v", r.Name, r.RulesHosts)
+		}
+	}
+}
+
 func TestConvertGatewayResourcesReportsAdditionalCertificateRefs(t *testing.T) {
 	hostname := gatewayv1.Hostname("app.example.com")
 

@@ -825,6 +825,62 @@ func TestTranslateIngressesAppliesHTTPRoutePolicyAfterIngress(t *testing.T) {
 	}
 }
 
+func TestTranslateIngressesHTTPRouteCertOverridesIngressCert(t *testing.T) {
+	timeouts := DefaultTimeouts{Cluster: 30 * time.Second, Route: 15 * time.Second, PerTry: 5 * time.Second}
+
+	ingress := newGenericIngress("app.com", "ingress-upstream.com")
+	ingress.Namespace = "ns1"
+	ingress.TLS = map[string]*k8s.IngressTLS{"app.com": {Host: "app.com", SecretName: "rsa-secret"}}
+
+	httpRoute := newGenericIngress("app.com", "httproute-upstream.com")
+	httpRoute.Namespace = "ns1"
+	httpRoute.Source = k8s.RouteSource{Kind: "HTTPRoute"}
+	httpRoute.TLS = map[string]*k8s.IngressTLS{"app.com": {Host: "app.com", SecretName: "p256-secret"}}
+
+	secrets := []*v1.Secret{
+		{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "rsa-secret"}, Data: map[string][]byte{"tls.crt": []byte(rsa2048crt), "tls.key": []byte(rsa2048key)}},
+		{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "p256-secret"}, Data: map[string][]byte{"tls.crt": []byte(p256crt), "tls.key": []byte(p256key)}},
+	}
+
+	cfg := translateIngresses([]*k8s.SourceRoute{httpRoute, ingress}, true, secrets, timeouts, "/var/log/envoy/")
+	if len(cfg.VirtualHosts) != 1 {
+		t.Fatalf("expected 1 virtual host, got %d", len(cfg.VirtualHosts))
+	}
+	if cfg.VirtualHosts[0].TlsCert != p256crt {
+		t.Errorf("expected HTTPRoute (p256) cert to win, got %q", cfg.VirtualHosts[0].TlsCert)
+	}
+	if cfg.VirtualHosts[0].TlsKey != p256key {
+		t.Errorf("expected HTTPRoute (p256) key to win, got %q", cfg.VirtualHosts[0].TlsKey)
+	}
+}
+
+func TestTranslateIngressesHTTPRouteWithoutTLSKeepsIngressCert(t *testing.T) {
+	timeouts := DefaultTimeouts{Cluster: 30 * time.Second, Route: 15 * time.Second, PerTry: 5 * time.Second}
+
+	ingress := newGenericIngress("app.com", "ingress-upstream.com")
+	ingress.Namespace = "ns1"
+	ingress.TLS = map[string]*k8s.IngressTLS{"app.com": {Host: "app.com", SecretName: "rsa-secret"}}
+
+	httpRoute := newGenericIngress("app.com", "httproute-upstream.com")
+	httpRoute.Namespace = "ns1"
+	httpRoute.Source = k8s.RouteSource{Kind: "HTTPRoute"}
+
+	secrets := []*v1.Secret{
+		{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "rsa-secret"}, Data: map[string][]byte{"tls.crt": []byte(rsa2048crt), "tls.key": []byte(rsa2048key)}},
+	}
+
+	cfg := translateIngresses([]*k8s.SourceRoute{httpRoute, ingress}, true, secrets, timeouts, "/var/log/envoy/")
+	if len(cfg.VirtualHosts) != 1 {
+		t.Fatalf("expected 1 virtual host, got %d", len(cfg.VirtualHosts))
+	}
+	if cfg.VirtualHosts[0].TlsCert != rsa2048crt {
+		t.Errorf("expected Ingress (rsa) cert to be kept, got %q", cfg.VirtualHosts[0].TlsCert)
+	}
+	if cfg.VirtualHosts[0].TlsKey != rsa2048key {
+		t.Errorf("expected Ingress (rsa) key to be kept, got %q", cfg.VirtualHosts[0].TlsKey)
+	}
+}
+
 func TestStickySessionAnnotationParsing(t *testing.T) {
 	ingress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
 		"yggdrasil.uswitch.com/sticky-sessions":            "true",

@@ -517,7 +517,7 @@ func makeHealthChecks(upstreamVHost string, healthPath string, config UpstreamHe
 
 func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPercentage int32, addresses []*core.Address) *v3cluster.Cluster {
 
-	tls := &auth.UpstreamTlsContext{Sni: c.VirtualHost}
+	tls := &auth.UpstreamTlsContext{}
 	if ca != "" {
 		tls.CommonTlsContext = &auth.CommonTlsContext{
 			ValidationContextType: &auth.CommonTlsContext_ValidationContext{

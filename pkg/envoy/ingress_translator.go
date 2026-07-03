@@ -556,7 +556,7 @@ func translateIngresses(ingresses []*k8s.SourceRoute, syncSecrets bool, secrets 
 
 			applyRoutePolicy(envoyIngress, ingress.Policy, ruleHost, isWildcard)
 
-			if syncSecrets && envoyIngress.vhost.TlsKey == "" && envoyIngress.vhost.TlsCert == "" {
+			if syncSecrets {
 				if hostTlsSecret, err := getHostTlsSecret(ingress, ruleHost, secrets); err != nil {
 					logrus.Infof("%s", err.Error())
 				} else {

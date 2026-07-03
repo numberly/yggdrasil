@@ -641,3 +641,79 @@ func namespacePtr(namespace string) *gatewayv1.Namespace {
 func fromNamespacesPtr(from gatewayv1.FromNamespaces) *gatewayv1.FromNamespaces {
 	return &from
 }
+
+func TestResolveGatewayUpstreamsPrecedence(t *testing.T) {
+	listener := gatewayv1.Listener{Name: gatewayv1.SectionName("https"), Port: gatewayv1.PortNumber(443), Protocol: gatewayv1.HTTPSProtocolType}
+	classConfig := GatewayClassConfig{Name: "public", ServiceNamespace: "gateway-system", ServiceName: "envoy"}
+	configuredService := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "envoy", Namespace: "gateway-system"},
+		Spec:       corev1.ServiceSpec{ExternalIPs: []string{"10.0.0.3"}, Ports: []corev1.ServicePort{{Port: 443}}},
+	}
+	ownedService := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "edge-owned",
+			Namespace:       "gateway-system",
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "gateway.networking.k8s.io/v1", Kind: "Gateway", Name: "edge"}},
+		},
+		Spec: corev1.ServiceSpec{ExternalIPs: []string{"10.0.0.2"}, Ports: []corev1.ServicePort{{Port: 443}}},
+	}
+	gatewayWithStatus := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "gateway-system"},
+		Status: gatewayv1.GatewayStatus{
+			Addresses: []gatewayv1.GatewayStatusAddress{{Value: "10.0.0.1"}, {Value: "lb.example.net"}},
+		},
+	}
+	gatewayWithoutStatus := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "gateway-system"}}
+
+	services := map[string]*corev1.Service{
+		"gateway-system/envoy":      configuredService,
+		"gateway-system/edge-owned": ownedService,
+	}
+
+	got := resolveGatewayUpstreams(gatewayWithStatus, listener, classConfig, services)
+	want := []UpstreamEndpoint{{Host: "10.0.0.1", Port: 443}, {Host: "lb.example.net", Port: 443}}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected status addresses to win, got %+v", got)
+	}
+
+	got = resolveGatewayUpstreams(gatewayWithoutStatus, listener, classConfig, services)
+	if len(got) != 1 || got[0] != (UpstreamEndpoint{Host: "10.0.0.2", Port: 443}) {
+		t.Fatalf("expected owned Service fallback, got %+v", got)
+	}
+
+	got = resolveGatewayUpstreams(gatewayWithoutStatus, listener, classConfig, map[string]*corev1.Service{"gateway-system/envoy": configuredService})
+	if len(got) != 1 || got[0] != (UpstreamEndpoint{Host: "10.0.0.3", Port: 443}) {
+		t.Fatalf("expected configured Service fallback, got %+v", got)
+	}
+
+	got = resolveGatewayUpstreams(gatewayWithoutStatus, listener, GatewayClassConfig{Name: "public"}, map[string]*corev1.Service{})
+	if len(got) != 0 {
+		t.Fatalf("expected no upstreams without any discovery source, got %+v", got)
+	}
+}
+
+func TestOwnedServiceUpstreamsIgnoresForeignOwners(t *testing.T) {
+	listener := gatewayv1.Listener{Port: gatewayv1.PortNumber(443)}
+	gateway := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "gateway-system"}}
+	services := map[string]*corev1.Service{
+		"gateway-system/other": {
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "other",
+				Namespace:       "gateway-system",
+				OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "edge"}},
+			},
+			Spec: corev1.ServiceSpec{ExternalIPs: []string{"10.0.0.9"}, Ports: []corev1.ServicePort{{Port: 443}}},
+		},
+		"apps/edge-owned": {
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "edge-owned",
+				Namespace:       "apps",
+				OwnerReferences: []metav1.OwnerReference{{APIVersion: "gateway.networking.k8s.io/v1", Kind: "Gateway", Name: "edge"}},
+			},
+			Spec: corev1.ServiceSpec{ExternalIPs: []string{"10.0.0.8"}, Ports: []corev1.ServicePort{{Port: 443}}},
+		},
+	}
+	if got := ownedServiceUpstreams(gateway, listener, services); len(got) != 0 {
+		t.Fatalf("expected no owned upstreams (wrong owner kind / wrong namespace), got %+v", got)
+	}
+}

@@ -6,13 +6,13 @@ import (
 	"sort"
 
 	"github.com/sirupsen/logrus"
+	"github.com/uswitch/yggdrasil/pkg/policy"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	networkingv1 "k8s.io/api/networking/v1"
 	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 )
 
-// Ingress is the version-agnostic description of an ingress
-type Ingress struct {
+type SourceRoute struct {
 	Namespace             string
 	Name                  string
 	Class                 *string
@@ -24,9 +24,10 @@ type Ingress struct {
 	Maintenance           bool
 	KubernetesClusterName string
 	Source                RouteSource
+	Policy *policy.RoutePolicy
+	PolicySource *policy.Source
 }
 
-// IngressTLS describes the transport layer security associated with an Ingress.
 type IngressTLS struct {
 	Host            string
 	SecretNamespace string
@@ -46,9 +47,8 @@ type RouteSource struct {
 	KubernetesClusterName string
 }
 
-// Get ingresses from stores and convert them to apiGroup-agnostic ingresses
-func (a *Aggregator) GetGenericIngresses() ([]*Ingress, error) {
-	ing := make([]*Ingress, 0)
+func (a *Aggregator) GetSourceRoutes() ([]*SourceRoute, error) {
+	ing := make([]*SourceRoute, 0)
 	for _, store := range a.ingressStores {
 		ingresses := store.Store.List()
 		for _, obj := range ingresses {
@@ -74,8 +74,7 @@ func (a *Aggregator) GetGenericIngresses() ([]*Ingress, error) {
 	return ing, nil
 }
 
-// Convert k8s ingress to apiGroup-agnostic ingress
-func convertToGenericIngress(ing interface{}, maintenance bool, kubernetesClusterName string) (ingress *Ingress, err error) {
+func convertToGenericIngress(ing interface{}, maintenance bool, kubernetesClusterName string) (ingress *SourceRoute, err error) {
 	switch t := ing.(type) {
 	case *extensionsv1beta1.Ingress:
 		i, ok := ing.(*extensionsv1beta1.Ingress)
@@ -98,11 +97,27 @@ func convertToGenericIngress(ing interface{}, maintenance bool, kubernetesCluste
 	default:
 		err = fmt.Errorf("unrecognized type for: %T", t)
 	}
+	if ingress != nil {
+		attachAnnotationPolicy(ingress)
+	}
 	return
 }
 
-func convertExtensionsv1beta1Ingress(i *extensionsv1beta1.Ingress, maintenance bool, kubernetesClusterName string) *Ingress {
-	return &Ingress{
+func attachAnnotationPolicy(route *SourceRoute) {
+	parsed, diagnostics := policy.ParseAnnotations(route.Annotations)
+	for _, diagnostic := range diagnostics {
+		logrus.Warnf("policy annotations for %s %s/%s: %s", route.Source.Kind, route.Namespace, route.Name, diagnostic)
+	}
+	route.Annotations = policy.StripAnnotations(route.Annotations)
+	if parsed == nil {
+		return
+	}
+	route.Policy = parsed
+	route.PolicySource = &policy.Source{Kind: "Annotations", Namespace: route.Namespace, Name: route.Name}
+}
+
+func convertExtensionsv1beta1Ingress(i *extensionsv1beta1.Ingress, maintenance bool, kubernetesClusterName string) *SourceRoute {
+	return &SourceRoute{
 		Namespace:   i.Namespace,
 		Name:        i.Name,
 		Class:       i.Spec.IngressClassName,
@@ -148,8 +163,8 @@ func convertExtensionsv1beta1Ingress(i *extensionsv1beta1.Ingress, maintenance b
 	}
 }
 
-func convertNetworkingv1beta1Ingress(i *networkingv1beta1.Ingress, maintenance bool, kubernetesClusterName string) *Ingress {
-	return &Ingress{
+func convertNetworkingv1beta1Ingress(i *networkingv1beta1.Ingress, maintenance bool, kubernetesClusterName string) *SourceRoute {
+	return &SourceRoute{
 		Namespace:   i.Namespace,
 		Name:        i.Name,
 		Class:       i.Spec.IngressClassName,
@@ -195,8 +210,8 @@ func convertNetworkingv1beta1Ingress(i *networkingv1beta1.Ingress, maintenance b
 	}
 }
 
-func convertNetworkingv1Ingress(i *networkingv1.Ingress, maintenance bool, kubernetesClusterName string) *Ingress {
-	return &Ingress{
+func convertNetworkingv1Ingress(i *networkingv1.Ingress, maintenance bool, kubernetesClusterName string) *SourceRoute {
+	return &SourceRoute{
 		Namespace:   i.Namespace,
 		Name:        i.Name,
 		Class:       i.Spec.IngressClassName,
@@ -242,13 +257,14 @@ func convertNetworkingv1Ingress(i *networkingv1.Ingress, maintenance bool, kuber
 	}
 }
 
-func GenericIngressEqual(a, b *Ingress) bool {
+func SourceRouteEqual(a, b *SourceRoute) bool {
 	if a.Name != b.Name ||
 		a.Namespace != b.Namespace ||
 		!deepStringEqualIgnoreOrder(a.RulesHosts, b.RulesHosts) ||
 		!deepStringEqualIgnoreOrder(a.Upstreams, b.Upstreams) ||
 		!reflect.DeepEqual(a.Annotations, b.Annotations) ||
-		!reflect.DeepEqual(a.TLS, b.TLS) {
+		!reflect.DeepEqual(a.TLS, b.TLS) ||
+		!reflect.DeepEqual(a.Policy, b.Policy) {
 		return false
 	}
 
@@ -259,7 +275,7 @@ func GenericIngressEqual(a, b *Ingress) bool {
 	return true
 }
 
-func (ing *Ingress) getUsableIngressClass() string {
+func (ing *SourceRoute) getUsableIngressClass() string {
 	if ing.Annotations["kubernetes.io/ingress.class"] != "" {
 		return ing.Annotations["kubernetes.io/ingress.class"]
 	}

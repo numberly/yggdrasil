@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/uswitch/yggdrasil/pkg/k8s"
+	"github.com/uswitch/yggdrasil/pkg/policy"
 	v1 "k8s.io/api/core/v1"
 )
 
@@ -245,7 +245,7 @@ func (cfg *envoyConfiguration) equals(oldCfg *envoyConfiguration) (vmatch bool, 
 	return VirtualHostsEquals(cfg.VirtualHosts, oldCfg.VirtualHosts), ClustersEquals(cfg.Clusters, oldCfg.Clusters)
 }
 
-func classFilter(ingresses []*k8s.Ingress, ingressClass []string) (is []*k8s.Ingress) {
+func classFilter(ingresses []*k8s.SourceRoute, ingressClass []string) (is []*k8s.SourceRoute) {
 	for _, i := range ingresses {
 		if i.Source.Kind == "HTTPRoute" {
 			is = append(is, i)
@@ -262,7 +262,7 @@ func classFilter(ingresses []*k8s.Ingress, ingressClass []string) (is []*k8s.Ing
 	return is
 }
 
-func validIngressFilter(ingresses []*k8s.Ingress) (vi []*k8s.Ingress) {
+func validIngressFilter(ingresses []*k8s.SourceRoute) (vi []*k8s.SourceRoute) {
 Ingress:
 	for _, i := range ingresses {
 		for _, u := range i.Upstreams {
@@ -379,7 +379,7 @@ func hostMatch(ruleHost, tlsHost string) bool {
 }
 
 // getHostTlsSecret returns the tls secret configured for a given ingress host
-func getHostTlsSecret(ingress *k8s.Ingress, host string, secrets []*v1.Secret) (*v1.Secret, error) {
+func getHostTlsSecret(ingress *k8s.SourceRoute, host string, secrets []*v1.Secret) (*v1.Secret, error) {
 	for _, tls := range ingress.TLS {
 		// TODO prefer a.a.b tls secret over *.a.b for host a.a.b when both are configured
 		if hostMatch(host, tls.Host) {
@@ -436,41 +436,14 @@ func validateTlsSecret(secret *v1.Secret) (bool, error) {
 	return true, nil
 }
 
-func (envoyIng *envoyIngress) addStickySession(ingress *k8s.Ingress) {
-	if ingress.Annotations["yggdrasil.uswitch.com/sticky-sessions"] != "true" {
-		return
-	}
-	cookieName := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-name"]
-	cookiePath := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-path"]
-	cookieTTLStr := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-ttl"]
-
-	if cookieName == "" || cookiePath == "" || cookieTTLStr == "" {
-		logrus.Warnf("sticky-sessions enabled for ingress %s/%s but missing required annotations (cookie-name, cookie-path, cookie-ttl), skipping sticky sessions", ingress.Namespace, ingress.Name)
-		return
-	}
-	cookieTTL, err := time.ParseDuration(cookieTTLStr)
-	if err != nil {
-		logrus.Warnf("invalid sticky-session-cookie-ttl for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
-		return
-	}
+func (envoyIng *envoyIngress) addStickySession(stickySessions *policy.StickySessions) {
 	envoyIng.vhost.StickySession = true
-	envoyIng.vhost.StickySessionCookieName = cookieName
-	envoyIng.vhost.StickySessionCookiePath = cookiePath
-	envoyIng.vhost.StickySessionCookieTTL = cookieTTL
+	envoyIng.vhost.StickySessionCookieName = stickySessions.CookieName
+	envoyIng.vhost.StickySessionCookiePath = stickySessions.CookiePath
+	envoyIng.vhost.StickySessionCookieTTL = stickySessions.CookieTTL
 
-	changeOnFailure := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-change-on-failure"] != "false"
+	changeOnFailure := stickySessions.ChangeOnFailure
 	envoyIng.cluster.StickySessionChangeOnFailure = &changeOnFailure
-}
-
-func (envoyIng *envoyIngress) addRetryOn(ingress *k8s.Ingress) {
-	if ingress.Annotations["yggdrasil.uswitch.com/retry-on"] != "" {
-		retryOn := ingress.Annotations["yggdrasil.uswitch.com/retry-on"]
-		if !ValidateEnvoyRetryOn(retryOn) {
-			logrus.Warnf("invalid retry-on parameter for ingress %s/%s: %s", ingress.Namespace, ingress.Name, retryOn)
-			return
-		}
-		envoyIng.vhost.RetryOn = retryOn
-	}
 }
 
 // isWildcard checks if the given host rule is a wildcard.
@@ -486,10 +459,10 @@ func validateSubdomain(ruleHost, host string) bool {
 	return strings.HasSuffix(host, ruleHost)
 }
 
-func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v1.Secret, timeouts DefaultTimeouts, accessLog string) *envoyConfiguration {
+func translateIngresses(ingresses []*k8s.SourceRoute, syncSecrets bool, secrets []*v1.Secret, timeouts DefaultTimeouts, accessLog string) *envoyConfiguration {
 	cfg := &envoyConfiguration{}
 	envoyIngresses := map[string]*envoyIngress{}
-	ruleHostToIngresses := map[string][]*k8s.Ingress{}
+	ruleHostToIngresses := map[string][]*k8s.SourceRoute{}
 	currentUpstreams := make(map[string]UpstreamInfo)
 
 	for _, i := range ingresses {
@@ -552,13 +525,13 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 						sourceKind = "Ingress"
 					}
 
-					// Add upstream
-					if weight64, err := strconv.ParseUint(ingress.Annotations["yggdrasil.uswitch.com/weight"], 10, 32); err == nil {
-						if weight64 != 0 {
-							envoyIngress.addUpstream(j, upstream.Port, uint32(weight64))
-						}
-					} else {
-						envoyIngress.addUpstream(j, upstream.Port, 1)
+					// Add upstream; an explicit weight of 0 excludes the upstream
+					weight := uint32(1)
+					if ingress.Policy != nil && ingress.Policy.Weight != nil {
+						weight = *ingress.Policy.Weight
+					}
+					if weight != 0 {
+						envoyIngress.addUpstream(j, upstream.Port, weight)
 					}
 					upstreamKey := fmt.Sprintf("%s-%s-%d", ruleHost, j, upstream.Port)
 					currentUpstreams[upstreamKey] = UpstreamInfo{
@@ -581,86 +554,7 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 				continue
 			}
 
-			if isWildcard {
-				if ingress.Annotations["yggdrasil.uswitch.com/healthcheck-host"] != "" {
-					envoyIngress.addHealthCheckHost(ingress.Annotations["yggdrasil.uswitch.com/healthcheck-host"])
-					if !validateSubdomain(ruleHost, envoyIngress.cluster.HealthCheckHost) {
-						logrus.Warnf("Healthcheck %s is not on the same subdomain for %s, annotation will be skipped", envoyIngress.cluster.HealthCheckHost, ruleHost)
-						envoyIngress.cluster.HealthCheckHost = ruleHost
-					}
-				} else {
-					logrus.Warnf("Be careful, healthcheck can't work for wildcard host : %s", envoyIngress.cluster.HealthCheckHost)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/healthcheck-path"] != "" {
-				envoyIngress.addHealthCheckPath(ingress.Annotations["yggdrasil.uswitch.com/healthcheck-path"])
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/timeout"] != "" {
-				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/timeout"])
-				if err == nil {
-					envoyIngress.addTimeout(timeout)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/cluster-timeout"] != "" {
-				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/cluster-timeout"])
-				if err == nil {
-					envoyIngress.setClusterTimeout(timeout)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/route-timeout"] != "" {
-				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/route-timeout"])
-				if err == nil {
-					envoyIngress.setRouteTimeout(timeout)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/per-try-timeout"] != "" {
-				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/per-try-timeout"])
-				if err == nil {
-					envoyIngress.setPerTryTimeout(timeout)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"] != "" {
-				// TODO validate, add error path
-				envoyIngress.setUpstreamHttpVersion(ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"])
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/idle-timeout"] != "" {
-				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/idle-timeout"])
-				if err == nil {
-					envoyIngress.cluster.IdleTimeout = &timeout
-				} else {
-					logrus.Warnf("invalid idle-timeout for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/max-connection-duration"] != "" {
-				dur, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/max-connection-duration"])
-				if err == nil {
-					envoyIngress.cluster.MaxConnectionDuration = &dur
-				} else {
-					logrus.Warnf("invalid max-connection-duration for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/max-requests-per-connection"] != "" {
-				val, err := strconv.ParseUint(ingress.Annotations["yggdrasil.uswitch.com/max-requests-per-connection"], 10, 32)
-				if err == nil {
-					v := uint32(val)
-					envoyIngress.cluster.MaxRequestsPerConnection = &v
-				} else {
-					logrus.Warnf("invalid max-requests-per-connection for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
-				}
-			}
-
-			envoyIngress.addRetryOn(ingress)
-
-			envoyIngress.addStickySession(ingress)
+			applyRoutePolicy(envoyIngress, ingress.Policy, ruleHost, isWildcard)
 
 			if syncSecrets && envoyIngress.vhost.TlsKey == "" && envoyIngress.vhost.TlsCert == "" {
 				if hostTlsSecret, err := getHostTlsSecret(ingress, ruleHost, secrets); err != nil {
@@ -700,7 +594,65 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 	return cfg
 }
 
-func sourceKindPriority(ingress *k8s.Ingress) int {
+// applyRoutePolicy maps the shared RoutePolicy model onto the generated Envoy
+// virtual host and cluster. It is the only place route policy influences
+// Envoy generation, whatever Policy Source the policy came from.
+func applyRoutePolicy(envoyIng *envoyIngress, routePolicy *policy.RoutePolicy, ruleHost string, isWildcard bool) {
+	if isWildcard {
+		if routePolicy != nil && routePolicy.HealthCheckHost != nil {
+			envoyIng.addHealthCheckHost(*routePolicy.HealthCheckHost)
+			if !validateSubdomain(ruleHost, envoyIng.cluster.HealthCheckHost) {
+				logrus.Warnf("Healthcheck %s is not on the same subdomain for %s, it will be skipped", envoyIng.cluster.HealthCheckHost, ruleHost)
+				envoyIng.cluster.HealthCheckHost = ruleHost
+			}
+		} else {
+			logrus.Warnf("Be careful, healthcheck can't work for wildcard host : %s", envoyIng.cluster.HealthCheckHost)
+		}
+	}
+
+	if routePolicy == nil {
+		return
+	}
+
+	if routePolicy.HealthCheckPath != nil {
+		envoyIng.addHealthCheckPath(*routePolicy.HealthCheckPath)
+	}
+	if routePolicy.Timeout != nil {
+		envoyIng.addTimeout(*routePolicy.Timeout)
+	}
+	if routePolicy.ClusterTimeout != nil {
+		envoyIng.setClusterTimeout(*routePolicy.ClusterTimeout)
+	}
+	if routePolicy.RouteTimeout != nil {
+		envoyIng.setRouteTimeout(*routePolicy.RouteTimeout)
+	}
+	if routePolicy.PerTryTimeout != nil {
+		envoyIng.setPerTryTimeout(*routePolicy.PerTryTimeout)
+	}
+	if routePolicy.UpstreamHTTPVersion != nil {
+		envoyIng.setUpstreamHttpVersion(*routePolicy.UpstreamHTTPVersion)
+	}
+	if routePolicy.IdleTimeout != nil {
+		timeout := *routePolicy.IdleTimeout
+		envoyIng.cluster.IdleTimeout = &timeout
+	}
+	if routePolicy.MaxConnectionDuration != nil {
+		duration := *routePolicy.MaxConnectionDuration
+		envoyIng.cluster.MaxConnectionDuration = &duration
+	}
+	if routePolicy.MaxRequestsPerConnection != nil {
+		maxRequests := *routePolicy.MaxRequestsPerConnection
+		envoyIng.cluster.MaxRequestsPerConnection = &maxRequests
+	}
+	if len(routePolicy.RetryOn) > 0 {
+		envoyIng.vhost.RetryOn = strings.Join(routePolicy.RetryOn, ",")
+	}
+	if routePolicy.StickySessions != nil {
+		envoyIng.addStickySession(routePolicy.StickySessions)
+	}
+}
+
+func sourceKindPriority(ingress *k8s.SourceRoute) int {
 	// Gateway API policy is applied after Ingress policy so HTTPRoute annotations win on same-host migrations.
 	if ingress.Source.Kind == "HTTPRoute" {
 		return 1

@@ -13,7 +13,7 @@ import (
 
 // Configurator is an interface that implements Generate and NodeID
 type Configurator interface {
-	Generate([]*k8s.Ingress, []*v1.Secret) (cache.Snapshot, error)
+	Generate([]*k8s.SourceRoute, []*v1.Secret) (cache.Snapshot, error)
 	NodeID() string
 }
 
@@ -31,7 +31,7 @@ func NewSnapshotter(snapshotCache cache.SnapshotCache, config Configurator, aggr
 }
 
 func (s *Snapshotter) snapshot() error {
-	genericIngresses, err := s.aggregator.GetGenericIngresses()
+	genericIngresses, err := s.aggregator.GetSourceRoutes()
 	if err != nil {
 		return err
 	}

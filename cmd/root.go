@@ -338,7 +338,7 @@ func createSources(clusters []clusterConfig) ([]k8s.KubernetesConfig, error) {
 		sources = append(sources, *kubernetesConfig)
 	}
 
-	if allInMaintenance {
+	if len(clusters) > 0 && allInMaintenance {
 		log.Fatal("All clusters are in maintenance mode")
 	}
 

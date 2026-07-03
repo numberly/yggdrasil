@@ -14,6 +14,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	gatewayclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
+
+	yggdrasilclient "github.com/uswitch/yggdrasil/pkg/client/clientset/versioned"
+	yggdrasilinformers "github.com/uswitch/yggdrasil/pkg/client/informers/externalversions"
 )
 
 type IngressStore struct {
@@ -96,7 +99,7 @@ func NewAggregator(k8sClients []KubernetesConfig, ctx context.Context, syncSecre
 				a.EventsIngresses(ctx, serviceInformer)
 				a.EventsIngresses(ctx, namespaceInformer)
 
-				a.gatewayStores = append(a.gatewayStores, GatewayStores{
+				stores := GatewayStores{
 					GatewayClasses:  gatewayClassInformer.GetStore(),
 					Gateways:        gatewayInformer.GetStore(),
 					HTTPRoutes:      httpRouteInformer.GetStore(),
@@ -106,8 +109,22 @@ func NewAggregator(k8sClients []KubernetesConfig, ctx context.Context, syncSecre
 					Maintenance:     c.maintenance,
 					ClusterName:     c.kubernetesClusterName,
 					ClassConfigs:    c.gatewayClasses,
-				})
+				}
 				informersSynced = append(informersSynced, gatewayClassInformer.HasSynced, gatewayInformer.HasSynced, httpRouteInformer.HasSynced, referenceGrantInformer.HasSynced, serviceInformer.HasSynced, namespaceInformer.HasSynced)
+
+				if _, err := c.source.ServerResourcesForGroupVersion("yggdrasil.uswitch.com/v1alpha1"); err != nil {
+					logrus.Warnf("YggdrasilPolicy CRD not available in cluster %s, HTTPRoute policies fall back to annotations: %v", c.kubernetesClusterName, err)
+				} else if policyClient, err := yggdrasilclient.NewForConfig(c.restConfig); err != nil {
+					logrus.Warnf("YggdrasilPolicy client unavailable for cluster %s: %v", c.kubernetesClusterName, err)
+				} else {
+					policyFactory := yggdrasilinformers.NewSharedInformerFactory(policyClient, time.Minute)
+					policyInformer := policyFactory.Yggdrasil().V1alpha1().YggdrasilPolicies().Informer()
+					a.EventsIngresses(ctx, policyInformer)
+					stores.YggdrasilPolicies = policyInformer.GetStore()
+					informersSynced = append(informersSynced, policyInformer.HasSynced)
+				}
+
+				a.gatewayStores = append(a.gatewayStores, stores)
 			}
 		}
 

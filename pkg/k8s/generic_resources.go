@@ -154,7 +154,7 @@ func convertExtensionsv1beta1Ingress(i *extensionsv1beta1.Ingress, maintenance b
 		Maintenance:           maintenance,
 		KubernetesClusterName: kubernetesClusterName,
 		Source: RouteSource{
-			Kind:                  "SourceRoute",
+			Kind:                  "Ingress",
 			Namespace:             i.Namespace,
 			Name:                  i.Name,
 			Class:                 stringValue(i.Spec.IngressClassName),
@@ -201,7 +201,7 @@ func convertNetworkingv1beta1Ingress(i *networkingv1beta1.Ingress, maintenance b
 		Maintenance:           maintenance,
 		KubernetesClusterName: kubernetesClusterName,
 		Source: RouteSource{
-			Kind:                  "SourceRoute",
+			Kind:                  "Ingress",
 			Namespace:             i.Namespace,
 			Name:                  i.Name,
 			Class:                 stringValue(i.Spec.IngressClassName),
@@ -248,7 +248,7 @@ func convertNetworkingv1Ingress(i *networkingv1.Ingress, maintenance bool, kuber
 		Maintenance:           maintenance,
 		KubernetesClusterName: kubernetesClusterName,
 		Source: RouteSource{
-			Kind:                  "SourceRoute",
+			Kind:                  "Ingress",
 			Namespace:             i.Namespace,
 			Name:                  i.Name,
 			Class:                 stringValue(i.Spec.IngressClassName),

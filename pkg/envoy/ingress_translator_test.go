@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/uswitch/yggdrasil/pkg/k8s"
+	"github.com/uswitch/yggdrasil/pkg/policy"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -169,8 +170,8 @@ func TestVirtualHostEquality(t *testing.T) {
 }
 
 func TestClusterEquality(t *testing.T) {
-	a := &cluster{Name: "foo", Hosts: []LBHost{{"host1", 1}, {"host2", 1}}}
-	b := &cluster{Name: "foo", Hosts: []LBHost{{"host1", 1}, {"host2", 1}}}
+	a := &cluster{Name: "foo", Hosts: []LBHost{{Host: "host1", Weight: 1}, {Host: "host2", Weight: 1}}}
+	b := &cluster{Name: "foo", Hosts: []LBHost{{Host: "host1", Weight: 1}, {Host: "host2", Weight: 1}}}
 
 	if !a.Equals(b) {
 		t.Error()
@@ -180,17 +181,17 @@ func TestClusterEquality(t *testing.T) {
 		t.Error("cluster is equals nil, expect not to be equal")
 	}
 
-	c := &cluster{Name: "bar", Hosts: []LBHost{{"host1", 1}, {"host2", 1}}}
+	c := &cluster{Name: "bar", Hosts: []LBHost{{Host: "host1", Weight: 1}, {Host: "host2", Weight: 1}}}
 	if a.Equals(c) {
 		t.Error("clusters have different names, expected not to be equal")
 	}
 
-	d := &cluster{Name: "foo", Hosts: []LBHost{{"host1", 1}}} // missing host2
+	d := &cluster{Name: "foo", Hosts: []LBHost{{Host: "host1", Weight: 1}}} // missing host2
 	if a.Equals(d) {
 		t.Error("clusters have different hosts, should be different")
 	}
 
-	e := &cluster{Name: "foo", Hosts: []LBHost{{"bad1", 1}, {"bad2", 1}}}
+	e := &cluster{Name: "foo", Hosts: []LBHost{{Host: "bad1", Weight: 1}, {Host: "bad2", Weight: 1}}}
 	if a.Equals(e) {
 		t.Error("cluster hosts are different, shouldn't be equal")
 	}
@@ -200,7 +201,7 @@ func TestClusterEquality(t *testing.T) {
 		t.Error("no hosts set")
 	}
 
-	g := &cluster{Name: "foo", Hosts: []LBHost{{"host1", 1}, {"host2", 1}}, Timeout: (5 * time.Second)}
+	g := &cluster{Name: "foo", Hosts: []LBHost{{Host: "host1", Weight: 1}, {Host: "host2", Weight: 1}}, Timeout: (5 * time.Second)}
 	if a.Equals(g) {
 		t.Error("clusters with different timeout values should not be equal")
 	}
@@ -213,6 +214,52 @@ func TestClusterEquality(t *testing.T) {
 	i := &cluster{Name: "foo", HealthCheckPath: "bar"}
 	if a.Equals(i) {
 		t.Error("cluster virtualHosts are different, shouldn't be equal")
+	}
+}
+
+func TestClusterEqualitySortsSameHostByPort(t *testing.T) {
+	a := &cluster{Name: "foo", Hosts: []LBHost{{Host: "host1", Port: 8081, Weight: 1}, {Host: "host1", Port: 8080, Weight: 1}}}
+	b := &cluster{Name: "foo", Hosts: []LBHost{{Host: "host1", Port: 8080, Weight: 1}, {Host: "host1", Port: 8081, Weight: 1}}}
+
+	if !a.Equals(b) {
+		t.Error("clusters with same host and port pairs should be equal regardless of order")
+	}
+}
+
+func TestTranslateIngressesPreservesSameHostDifferentPorts(t *testing.T) {
+	ingress := &k8s.SourceRoute{
+		Namespace: "default",
+		Name:      "same-host-different-ports",
+		Annotations: map[string]string{
+			"kubernetes.io/ingress.class": "bar",
+		},
+		RulesHosts: []string{"app.com"},
+		UpstreamEndpoints: []k8s.UpstreamEndpoint{
+			{Host: "10.0.0.1", Port: 8080},
+			{Host: "10.0.0.1", Port: 8081},
+		},
+		Source: k8s.RouteSource{Kind: "HTTPRoute"},
+	}
+
+	c := translateIngresses([]*k8s.SourceRoute{ingress}, false, []*v1.Secret{}, DefaultTimeouts{}, "/var/log/envoy/")
+
+	if len(c.Clusters) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(c.Clusters))
+	}
+
+	hosts := c.Clusters[0].Hosts
+	if len(hosts) != 2 {
+		t.Fatalf("expected 2 upstream hosts, got %+v", hosts)
+	}
+
+	expectedHosts := []LBHost{
+		{Host: "10.0.0.1", Port: 8080, Weight: 1},
+		{Host: "10.0.0.1", Port: 8081, Weight: 1},
+	}
+	for i, expected := range expectedHosts {
+		if hosts[i] != expected {
+			t.Fatalf("unexpected upstream %d: got %+v, want %+v", i, hosts[i], expected)
+		}
 	}
 }
 
@@ -247,8 +294,8 @@ func TestEquals(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
-	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{ingress, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.SourceRoute{ingress, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c.equals(c2)
 	if vmatch != true {
@@ -269,8 +316,8 @@ func TestNotEquals(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress, ingress3, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
-	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2, ingress4}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{ingress, ingress3, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.SourceRoute{ingress, ingress2, ingress4}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c.equals(c2)
 	if vmatch == true {
@@ -290,8 +337,8 @@ func TestPartialEquals(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
-	c2 := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.SourceRoute{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c2.equals(c)
 	if vmatch != true {
@@ -310,7 +357,7 @@ func TestGeneratesForSingleIngress(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Error("expected 1 virtual host")
@@ -351,7 +398,7 @@ func TestGeneratesForMultipleIngressSharingSpecHost(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{fooIngress, barIngress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{fooIngress, barIngress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Error("expected 1 virtual host")
@@ -383,8 +430,68 @@ func TestGeneratesForMultipleIngressSharingSpecHost(t *testing.T) {
 	}
 }
 
+func TestTranslateIngressesMergesIngressesWithDivergentAnnotations(t *testing.T) {
+	fooIngress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
+		"yggdrasil.uswitch.com/route-timeout": "1s",
+	})
+	barIngress := newGenericIngressWithAnnotations("app.com", "bar.com", map[string]string{
+		"yggdrasil.uswitch.com/route-timeout": "2s",
+	})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.SourceRoute{fooIngress, barIngress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+
+	if len(c.VirtualHosts) != 1 {
+		t.Fatalf("expected 1 virtual host, got %d", len(c.VirtualHosts))
+	}
+	if len(c.Clusters) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(c.Clusters))
+	}
+	if len(c.Clusters[0].Hosts) != 2 {
+		t.Fatalf("expected 2 hosts, got %d", len(c.Clusters[0].Hosts))
+	}
+
+	hosts := map[string]bool{}
+	for _, host := range c.Clusters[0].Hosts {
+		hosts[host.Host] = true
+	}
+	if !hosts["foo.com"] || !hosts["bar.com"] {
+		t.Fatalf("expected merged upstreams from both ingresses, got %+v", c.Clusters[0].Hosts)
+	}
+}
+
+func TestGeneratesForWeightedMultipleIngressesSharingSpecHost(t *testing.T) {
+	fooIngress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
+		"yggdrasil.uswitch.com/weight": "2",
+	})
+	barIngress := newGenericIngressWithAnnotations("app.com", "bar.com", map[string]string{
+		"yggdrasil.uswitch.com/weight": "3",
+	})
+
+	c := translateIngresses([]*k8s.SourceRoute{fooIngress, barIngress}, false, []*v1.Secret{}, DefaultTimeouts{}, "/var/log/envoy/")
+
+	if len(c.VirtualHosts) != 1 {
+		t.Fatalf("expected 1 virtual host, got %d", len(c.VirtualHosts))
+	}
+	if len(c.Clusters) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(c.Clusters))
+	}
+	if len(c.Clusters[0].Hosts) != 2 {
+		t.Fatalf("expected 2 upstreams, got %+v", c.Clusters[0].Hosts)
+	}
+	if c.Clusters[0].Hosts[0].Host != "foo.com" || c.Clusters[0].Hosts[0].Weight != 2 {
+		t.Fatalf("expected foo.com weight 2, got %+v", c.Clusters[0].Hosts[0])
+	}
+	if c.Clusters[0].Hosts[1].Host != "bar.com" || c.Clusters[0].Hosts[1].Weight != 3 {
+		t.Fatalf("expected bar.com weight 3, got %+v", c.Clusters[0].Hosts[1])
+	}
+}
+
 func TestFilterMatchingIngresses(t *testing.T) {
-	ingress := []*k8s.Ingress{
+	ingress := []*k8s.SourceRoute{
 		newGenericIngress("host", "balancer"),
 	}
 	ingressClasses := []string{"bar"}
@@ -394,7 +501,7 @@ func TestFilterMatchingIngresses(t *testing.T) {
 	}
 }
 func TestFilterNonMatchingIngresses(t *testing.T) {
-	ingress := []*k8s.Ingress{
+	ingress := []*k8s.SourceRoute{
 		newGenericIngress("host", "balancer"),
 	}
 	ingressClasses := []string{"another-class"}
@@ -411,14 +518,14 @@ func TestIngressWithIP(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 	if c.Clusters[0].Hosts[0].Host != "127.0.0.1" {
 		t.Errorf("expected cluster host to be IP address, was %v", c.Clusters[0].Hosts[0].Host)
 	}
 }
 
 func TestIngressFilterWithValidConfigWithHostname(t *testing.T) {
-	ingresses := []*k8s.Ingress{
+	ingresses := []*k8s.SourceRoute{
 		newGenericIngress("app.com", "foo.com"),
 	}
 	matchingIngresses := validIngressFilter(ingresses)
@@ -428,7 +535,7 @@ func TestIngressFilterWithValidConfigWithHostname(t *testing.T) {
 }
 
 func TestIngressFilterWithValidConfigWithIP(t *testing.T) {
-	ingresses := []*k8s.Ingress{
+	ingresses := []*k8s.SourceRoute{
 		newGenericIngress("app.com", "127.0.0.1"),
 	}
 	matchingIngresses := validIngressFilter(ingresses)
@@ -438,7 +545,7 @@ func TestIngressFilterWithValidConfigWithIP(t *testing.T) {
 }
 
 func TestIngressFilterWithNoHost(t *testing.T) {
-	ingresses := []*k8s.Ingress{
+	ingresses := []*k8s.SourceRoute{
 		newGenericIngress("", "foo.com"),
 	}
 	matchingIngresses := validIngressFilter(ingresses)
@@ -448,7 +555,7 @@ func TestIngressFilterWithNoHost(t *testing.T) {
 }
 
 func TestIngressFilterWithNoLoadBalancerHostName(t *testing.T) {
-	ingresses := []*k8s.Ingress{
+	ingresses := []*k8s.SourceRoute{
 		newGenericIngress("app.com", ""),
 	}
 	matchingIngresses := validIngressFilter(ingresses)
@@ -494,7 +601,7 @@ func TestGetHostTlsSecret(t *testing.T) {
 		&v1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns2", Name: "bar"}},
 		&v1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns2", Name: "foo"}},
 	}
-	ing := &k8s.Ingress{
+	ing := &k8s.SourceRoute{
 		Namespace:  "ns1",
 		Name:       "ing",
 		RulesHosts: []string{"foo", "boo", "bar"},
@@ -516,6 +623,13 @@ func TestGetHostTlsSecret(t *testing.T) {
 		t.Errorf("expected secret, caught error: %s", err.Error())
 	} else if sec.Namespace != ing.Namespace || sec.Name != "bar" {
 		t.Errorf("expected secret ns1/bar but got %s/%s", sec.Namespace, sec.Name)
+	}
+
+	ing.TLS["gateway"] = &k8s.IngressTLS{Host: "gateway", SecretNamespace: "ns3", SecretName: "bar"}
+	if sec, err := getHostTlsSecret(ing, "gateway", secrets); err != nil {
+		t.Errorf("expected cross-namespace secret, caught error: %s", err.Error())
+	} else if sec.Namespace != "ns3" || sec.Name != "bar" {
+		t.Errorf("expected secret ns3/bar but got %s/%s", sec.Namespace, sec.Name)
 	}
 
 	if sec, _ := getHostTlsSecret(ing, "nope", secrets); sec != nil {
@@ -631,8 +745,8 @@ func newIngress(specHost string, loadbalancerHost string) v1beta1.Ingress {
 			},
 		},
 		Status: v1beta1.IngressStatus{
-			LoadBalancer: v1.LoadBalancerStatus{
-				Ingress: []v1.LoadBalancerIngress{
+			LoadBalancer: v1beta1.IngressLoadBalancerStatus{
+				Ingress: []v1beta1.IngressLoadBalancerIngress{
 					{Hostname: loadbalancerHost},
 				},
 			},
@@ -640,8 +754,8 @@ func newIngress(specHost string, loadbalancerHost string) v1beta1.Ingress {
 	}
 }
 
-func newGenericIngress(specHost string, loadbalancerHost string) *k8s.Ingress {
-	return &k8s.Ingress{
+func newGenericIngress(specHost string, loadbalancerHost string) *k8s.SourceRoute {
+	return &k8s.SourceRoute{
 		Annotations: map[string]string{
 			"kubernetes.io/ingress.class": "bar",
 		},
@@ -650,27 +764,120 @@ func newGenericIngress(specHost string, loadbalancerHost string) *k8s.Ingress {
 	}
 }
 
-func newGenericIngressWithAnnotations(specHost string, loadbalancerHost string, annotations map[string]string) *k8s.Ingress {
+func newGenericIngressWithAnnotations(specHost string, loadbalancerHost string, annotations map[string]string) *k8s.SourceRoute {
 	mergedAnnotations := map[string]string{
 		"kubernetes.io/ingress.class": "bar",
 	}
 	for k, v := range annotations {
 		mergedAnnotations[k] = v
 	}
-	return &k8s.Ingress{
-		Annotations: mergedAnnotations,
+	// mirror the conversion layer: annotations are a Policy Source parsed
+	// into the shared RoutePolicy before Envoy generation
+	parsed, _ := policy.ParseAnnotations(mergedAnnotations)
+	return &k8s.SourceRoute{
+		Annotations: policy.StripAnnotations(mergedAnnotations),
 		RulesHosts:  []string{specHost},
 		Upstreams:   []string{loadbalancerHost},
+		Policy:      parsed,
 	}
 }
 
-func newIngressIP(specHost string, loadbalancerHost string) *k8s.Ingress {
-	return &k8s.Ingress{
+func newIngressIP(specHost string, loadbalancerHost string) *k8s.SourceRoute {
+	return &k8s.SourceRoute{
 		Annotations: map[string]string{
 			"kubernetes.io/ingress.class": "bar",
 		},
 		RulesHosts: []string{specHost},
 		Upstreams:  []string{loadbalancerHost},
+	}
+}
+
+func TestTranslateIngressesAppliesHTTPRoutePolicyAfterIngress(t *testing.T) {
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	ingress := newGenericIngressWithAnnotations("app.com", "ingress-upstream.com", map[string]string{
+		"yggdrasil.uswitch.com/route-timeout": "1s",
+	})
+	httpRoute := newGenericIngressWithAnnotations("app.com", "httproute-upstream.com", map[string]string{
+		"yggdrasil.uswitch.com/route-timeout": "2s",
+	})
+	httpRoute.Source = k8s.RouteSource{Kind: "HTTPRoute"}
+
+	cfg := translateIngresses([]*k8s.SourceRoute{httpRoute, ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	if len(cfg.VirtualHosts) != 1 {
+		t.Fatalf("expected 1 virtual host, got %d", len(cfg.VirtualHosts))
+	}
+	if cfg.VirtualHosts[0].Timeout != 2*time.Second {
+		t.Fatalf("expected HTTPRoute route timeout to win, got %s", cfg.VirtualHosts[0].Timeout)
+	}
+	if len(cfg.Clusters) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(cfg.Clusters))
+	}
+	hosts := map[string]bool{}
+	for _, host := range cfg.Clusters[0].Hosts {
+		hosts[host.Host] = true
+	}
+	if !hosts["ingress-upstream.com"] || !hosts["httproute-upstream.com"] {
+		t.Fatalf("expected merged upstreams from both sources, got %+v", cfg.Clusters[0].Hosts)
+	}
+}
+
+func TestTranslateIngressesHTTPRouteCertOverridesIngressCert(t *testing.T) {
+	timeouts := DefaultTimeouts{Cluster: 30 * time.Second, Route: 15 * time.Second, PerTry: 5 * time.Second}
+
+	ingress := newGenericIngress("app.com", "ingress-upstream.com")
+	ingress.Namespace = "ns1"
+	ingress.TLS = map[string]*k8s.IngressTLS{"app.com": {Host: "app.com", SecretName: "rsa-secret"}}
+
+	httpRoute := newGenericIngress("app.com", "httproute-upstream.com")
+	httpRoute.Namespace = "ns1"
+	httpRoute.Source = k8s.RouteSource{Kind: "HTTPRoute"}
+	httpRoute.TLS = map[string]*k8s.IngressTLS{"app.com": {Host: "app.com", SecretName: "p256-secret"}}
+
+	secrets := []*v1.Secret{
+		{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "rsa-secret"}, Data: map[string][]byte{"tls.crt": []byte(rsa2048crt), "tls.key": []byte(rsa2048key)}},
+		{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "p256-secret"}, Data: map[string][]byte{"tls.crt": []byte(p256crt), "tls.key": []byte(p256key)}},
+	}
+
+	cfg := translateIngresses([]*k8s.SourceRoute{httpRoute, ingress}, true, secrets, timeouts, "/var/log/envoy/")
+	if len(cfg.VirtualHosts) != 1 {
+		t.Fatalf("expected 1 virtual host, got %d", len(cfg.VirtualHosts))
+	}
+	if cfg.VirtualHosts[0].TlsCert != p256crt {
+		t.Errorf("expected HTTPRoute (p256) cert to win, got %q", cfg.VirtualHosts[0].TlsCert)
+	}
+	if cfg.VirtualHosts[0].TlsKey != p256key {
+		t.Errorf("expected HTTPRoute (p256) key to win, got %q", cfg.VirtualHosts[0].TlsKey)
+	}
+}
+
+func TestTranslateIngressesHTTPRouteWithoutTLSKeepsIngressCert(t *testing.T) {
+	timeouts := DefaultTimeouts{Cluster: 30 * time.Second, Route: 15 * time.Second, PerTry: 5 * time.Second}
+
+	ingress := newGenericIngress("app.com", "ingress-upstream.com")
+	ingress.Namespace = "ns1"
+	ingress.TLS = map[string]*k8s.IngressTLS{"app.com": {Host: "app.com", SecretName: "rsa-secret"}}
+
+	httpRoute := newGenericIngress("app.com", "httproute-upstream.com")
+	httpRoute.Namespace = "ns1"
+	httpRoute.Source = k8s.RouteSource{Kind: "HTTPRoute"}
+
+	secrets := []*v1.Secret{
+		{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "rsa-secret"}, Data: map[string][]byte{"tls.crt": []byte(rsa2048crt), "tls.key": []byte(rsa2048key)}},
+	}
+
+	cfg := translateIngresses([]*k8s.SourceRoute{httpRoute, ingress}, true, secrets, timeouts, "/var/log/envoy/")
+	if len(cfg.VirtualHosts) != 1 {
+		t.Fatalf("expected 1 virtual host, got %d", len(cfg.VirtualHosts))
+	}
+	if cfg.VirtualHosts[0].TlsCert != rsa2048crt {
+		t.Errorf("expected Ingress (rsa) cert to be kept, got %q", cfg.VirtualHosts[0].TlsCert)
+	}
+	if cfg.VirtualHosts[0].TlsKey != rsa2048key {
+		t.Errorf("expected Ingress (rsa) key to be kept, got %q", cfg.VirtualHosts[0].TlsKey)
 	}
 }
 
@@ -686,7 +893,7 @@ func TestStickySessionAnnotationParsing(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Fatal("expected 1 virtual host")
@@ -715,7 +922,7 @@ func TestStickySessionMissingAnnotations(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Fatal("expected 1 virtual host")
@@ -727,10 +934,10 @@ func TestStickySessionMissingAnnotations(t *testing.T) {
 
 func TestStickySessionChangeOnFailureFalse(t *testing.T) {
 	ingress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
-		"yggdrasil.uswitch.com/sticky-sessions":                      "true",
-		"yggdrasil.uswitch.com/sticky-session-cookie-name":           "my-session",
-		"yggdrasil.uswitch.com/sticky-session-cookie-path":           "/",
-		"yggdrasil.uswitch.com/sticky-session-cookie-ttl":            "3600s",
+		"yggdrasil.uswitch.com/sticky-sessions":                  "true",
+		"yggdrasil.uswitch.com/sticky-session-cookie-name":       "my-session",
+		"yggdrasil.uswitch.com/sticky-session-cookie-path":       "/",
+		"yggdrasil.uswitch.com/sticky-session-cookie-ttl":        "3600s",
 		"yggdrasil.uswitch.com/sticky-session-change-on-failure": "false",
 	})
 	timeouts := DefaultTimeouts{
@@ -738,7 +945,7 @@ func TestStickySessionChangeOnFailureFalse(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.Clusters) != 1 {
 		t.Fatal("expected 1 cluster")
@@ -760,7 +967,7 @@ func TestStickySessionChangeOnFailureDefault(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.Clusters) != 1 {
 		t.Fatal("expected 1 cluster")
@@ -779,7 +986,7 @@ func TestStickySessionChangeOnFailureWithoutStickySessions(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.Clusters) != 1 {
 		t.Fatal("expected 1 cluster")
@@ -796,7 +1003,7 @@ func TestStickySessionDisabled(t *testing.T) {
 		Route:   15 * time.Second,
 		PerTry:  5 * time.Second,
 	}
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c := translateIngresses([]*k8s.SourceRoute{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Fatal("expected 1 virtual host")

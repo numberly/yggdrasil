@@ -3,13 +3,48 @@ package k8s
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	networkingv1 "k8s.io/api/networking/v1"
 	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/cache"
 )
+
+func TestGetGenericIngressesKeepsIngressesWhenGatewayConversionFails(t *testing.T) {
+	badGatewayStore := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	if err := badGatewayStore.Add(&corev1.Service{ObjectMeta: v1.ObjectMeta{Name: "not-a-gateway", Namespace: "default"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	aggregator := &Aggregator{
+		ingressStores: []IngressStore{{
+			Store: testStore(&networkingv1.Ingress{
+				ObjectMeta: v1.ObjectMeta{Name: "app", Namespace: "default"},
+				Spec: networkingv1.IngressSpec{
+					Rules: []networkingv1.IngressRule{{Host: "app.example.com"}},
+				},
+			}),
+			KubernetesClusterName: "cluster-a",
+		}},
+		gatewayStores: []GatewayStores{{
+			Gateways:     badGatewayStore,
+			ClusterName:  "cluster-a",
+			ClassConfigs: []GatewayClassConfig{{Name: "public"}},
+		}},
+	}
+
+	ingresses, err := aggregator.GetSourceRoutes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ingresses) != 1 {
+		t.Fatalf("expected healthy ingress to remain, got %d ingresses", len(ingresses))
+	}
+	if ingresses[0].Name != "app" {
+		t.Fatalf("unexpected ingress returned: %+v", ingresses[0])
+	}
+}
 
 func TestConvertExtensionsV1beta1Ingress(t *testing.T) {
 	ev1b1 := &extensionsv1beta1.Ingress{
@@ -31,8 +66,8 @@ func TestConvertExtensionsV1beta1Ingress(t *testing.T) {
 			},
 		},
 		Status: extensionsv1beta1.IngressStatus{
-			LoadBalancer: corev1.LoadBalancerStatus{
-				Ingress: []corev1.LoadBalancerIngress{
+			LoadBalancer: extensionsv1beta1.IngressLoadBalancerStatus{
+				Ingress: []extensionsv1beta1.IngressLoadBalancerIngress{
 					{IP: "1.2.3.4"},
 					{IP: "5.6.7.8"},
 				},
@@ -81,8 +116,8 @@ func TestConvertNetworkingV1beta1Ingress(t *testing.T) {
 			},
 		},
 		Status: networkingv1beta1.IngressStatus{
-			LoadBalancer: corev1.LoadBalancerStatus{
-				Ingress: []corev1.LoadBalancerIngress{
+			LoadBalancer: networkingv1beta1.IngressLoadBalancerStatus{
+				Ingress: []networkingv1beta1.IngressLoadBalancerIngress{
 					{IP: "1.2.3.4"},
 					{IP: "5.6.7.8"},
 				},
@@ -133,8 +168,8 @@ func TestConvertNetworkingV1Ingress(t *testing.T) {
 			},
 		},
 		Status: networkingv1.IngressStatus{
-			LoadBalancer: corev1.LoadBalancerStatus{
-				Ingress: []corev1.LoadBalancerIngress{
+			LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+				Ingress: []networkingv1.IngressLoadBalancerIngress{
 					{IP: "1.2.3.4"},
 					{IP: "5.6.7.8"},
 				},
@@ -184,8 +219,8 @@ func TestCompareConvertedV1V1beta1Ingresses(t *testing.T) {
 			},
 		},
 		Status: extensionsv1beta1.IngressStatus{
-			LoadBalancer: corev1.LoadBalancerStatus{
-				Ingress: []corev1.LoadBalancerIngress{
+			LoadBalancer: extensionsv1beta1.IngressLoadBalancerStatus{
+				Ingress: []extensionsv1beta1.IngressLoadBalancerIngress{
 					{IP: "1.2.3.4"},
 					{IP: "5.6.7.8"},
 				},
@@ -218,8 +253,8 @@ func TestCompareConvertedV1V1beta1Ingresses(t *testing.T) {
 			},
 		},
 		Status: networkingv1.IngressStatus{
-			LoadBalancer: corev1.LoadBalancerStatus{
-				Ingress: []corev1.LoadBalancerIngress{
+			LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+				Ingress: []networkingv1.IngressLoadBalancerIngress{
 					{IP: "1.2.3.4"},
 					{IP: "5.6.7.8"},
 				},
@@ -231,7 +266,7 @@ func TestCompareConvertedV1V1beta1Ingresses(t *testing.T) {
 		t.Error(err)
 	}
 
-	if !GenericIngressEqual(genv1b1, genv1) {
+	if !SourceRouteEqual(genv1b1, genv1) {
 		t.Error("ingress from v1beta1 not equal to one in v1, expected equality")
 	}
 }

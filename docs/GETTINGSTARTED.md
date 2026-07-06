@@ -103,10 +103,49 @@ metadata:
   namespace: '*'
   name: yggdrasil-read-only
 rules:
-- apiGroups: ["extensions"]
+- apiGroups: ["extensions", "networking.k8s.io"]
   resources: ["ingresses"]
   verbs: ["get", "list", "watch"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gatewayclasses", "gateways", "httproutes", "referencegrants"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["yggdrasil.uswitch.com"]
+  resources: ["yggdrasilpolicies"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["services", "namespaces"]
+  verbs: ["get", "list", "watch"]
 ```
+
+If `syncSecrets` is enabled, add read access to TLS secrets as well:
+
+```yaml
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+```
+
+### Gateway address discovery
+
+For each Gateway, Yggdrasil discovers the data-plane address used as Envoy
+upstream endpoints in the following order (first match wins):
+
+1. `Gateway.status.addresses` (published by any conformant Gateway API
+   implementation), combined with the listener port.
+2. A Service in the Gateway's namespace whose `ownerReferences` point at the
+   Gateway (per-Gateway deployments), using its `externalIPs` or LoadBalancer
+   ingress.
+3. The optional `serviceNamespace`/`serviceName` fields of the matching
+   `gatewayClasses` entry in the Yggdrasil configuration. This is only needed
+   for implementations that share one Service across Gateways without
+   publishing status addresses (e.g. Envoy Gateway merged mode with
+   `externalIPs`, see envoyproxy/gateway#8987).
+
+If no address is found, the route is skipped and a diagnostic is reported.
+
+For Gateway API HTTPS listeners, Yggdrasil currently uses only the first
+`listener.tls.certificateRefs` entry. Additional certificate references are
+ignored and reported as diagnostics.
 
 And apply the following ClusterRoleBinding:
 ```yaml

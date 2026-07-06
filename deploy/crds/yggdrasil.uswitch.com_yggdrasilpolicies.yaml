@@ -1,0 +1,125 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: yggdrasilpolicies.yggdrasil.uswitch.com
+spec:
+  group: yggdrasil.uswitch.com
+  names:
+    kind: YggdrasilPolicy
+    listKind: YggdrasilPolicyList
+    plural: yggdrasilpolicies
+    singular: yggdrasilpolicy
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["targetRef"]
+              properties:
+                targetRef:
+                  type: object
+                  required: ["group", "kind", "name"]
+                  description: >-
+                    The same-namespace HTTPRoute this policy applies to. Only
+                    group gateway.networking.k8s.io and kind HTTPRoute are
+                    valid targets.
+                  properties:
+                    group:
+                      type: string
+                      enum: ["gateway.networking.k8s.io"]
+                    kind:
+                      type: string
+                      enum: ["HTTPRoute"]
+                    name:
+                      type: string
+                      minLength: 1
+                healthCheck:
+                  type: object
+                  properties:
+                    path:
+                      type: string
+                    host:
+                      type: string
+                      description: >-
+                        Overrides the health check host, used with wildcard
+                        route hosts.
+                timeouts:
+                  type: object
+                  description: Go duration strings, e.g. "30s" or "1m30s".
+                  properties:
+                    default:
+                      type: string
+                      description: Sets route, per-try and cluster timeouts at once.
+                    route:
+                      type: string
+                    perTry:
+                      type: string
+                    cluster:
+                      type: string
+                retry:
+                  type: object
+                  properties:
+                    retryOn:
+                      type: array
+                      items:
+                        type: string
+                        enum:
+                          - "5xx"
+                          - "gateway-error"
+                          - "reset"
+                          - "connect-failure"
+                          - "envoy-ratelimited"
+                          - "retriable-4xx"
+                          - "refused-stream"
+                          - "retriable-status-codes"
+                          - "retriable-headers"
+                          - "http3-post-connect-failure"
+                upstream:
+                  type: object
+                  properties:
+                    httpVersion:
+                      type: string
+                      enum: ["1.1", "2"]
+                    weight:
+                      type: integer
+                      format: int32
+                      minimum: 0
+                      description: >-
+                        Load balancing weight of this route's upstreams. An
+                        explicit 0 excludes the upstreams.
+                connection:
+                  type: object
+                  properties:
+                    idleTimeout:
+                      type: string
+                    maxConnectionDuration:
+                      type: string
+                    maxRequestsPerConnection:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                stickySessions:
+                  type: object
+                  required: ["enabled"]
+                  properties:
+                    enabled:
+                      type: boolean
+                    cookieName:
+                      type: string
+                    cookiePath:
+                      type: string
+                    cookieTTL:
+                      type: string
+                      description: Go duration string, e.g. "1h".
+                    changeOnFailure:
+                      type: boolean
+                      description: >-
+                        Whether sessions move away from unhealthy backends.
+                        Defaults to true.

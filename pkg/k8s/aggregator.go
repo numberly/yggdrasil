@@ -12,6 +12,11 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	gatewayclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
+	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
+
+	yggdrasilclient "github.com/uswitch/yggdrasil/pkg/client/clientset/versioned"
+	yggdrasilinformers "github.com/uswitch/yggdrasil/pkg/client/informers/externalversions"
 )
 
 type IngressStore struct {
@@ -24,6 +29,7 @@ type Aggregator struct {
 	factories     []*informers.SharedInformerFactory
 	events        chan SyncDataEvent
 	ingressStores []IngressStore
+	gatewayStores []GatewayStores
 	secretsStore  []cache.Store
 }
 
@@ -51,6 +57,7 @@ func NewAggregator(k8sClients []KubernetesConfig, ctx context.Context, syncSecre
 	a := Aggregator{
 		events:        make(chan SyncDataEvent, watch.DefaultChanSize),
 		ingressStores: []IngressStore{},
+		gatewayStores: []GatewayStores{},
 		secretsStore:  []cache.Store{},
 	}
 	informersSynced := []cache.InformerSynced{}
@@ -71,6 +78,56 @@ func NewAggregator(k8sClients []KubernetesConfig, ctx context.Context, syncSecre
 
 		a.factories = append(a.factories, &factory)
 		informersSynced = append(informersSynced, ingressInformer.HasSynced)
+
+		if len(c.gatewayClasses) > 0 {
+			if _, err := c.source.ServerResourcesForGroupVersion("gateway.networking.k8s.io/v1"); err != nil {
+				logrus.Warnf("Gateway API not available in cluster %s, skipping gateway informers: %v", c.kubernetesClusterName, err)
+			} else if gatewayClient, err := gatewayclient.NewForConfig(c.restConfig); err != nil {
+				logrus.Warnf("Gateway API client unavailable for cluster %s: %v", c.kubernetesClusterName, err)
+			} else {
+				gatewayFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, time.Minute)
+				gatewayClassInformer := gatewayFactory.Gateway().V1().GatewayClasses().Informer()
+				gatewayInformer := gatewayFactory.Gateway().V1().Gateways().Informer()
+				httpRouteInformer := gatewayFactory.Gateway().V1().HTTPRoutes().Informer()
+				referenceGrantInformer := gatewayFactory.Gateway().V1().ReferenceGrants().Informer()
+				serviceInformer := factory.Core().V1().Services().Informer()
+				namespaceInformer := factory.Core().V1().Namespaces().Informer()
+
+				a.EventsIngresses(ctx, gatewayClassInformer)
+				a.EventsIngresses(ctx, gatewayInformer)
+				a.EventsIngresses(ctx, httpRouteInformer)
+				a.EventsIngresses(ctx, referenceGrantInformer)
+				a.EventsIngresses(ctx, serviceInformer)
+				a.EventsIngresses(ctx, namespaceInformer)
+
+				stores := GatewayStores{
+					GatewayClasses:  gatewayClassInformer.GetStore(),
+					Gateways:        gatewayInformer.GetStore(),
+					HTTPRoutes:      httpRouteInformer.GetStore(),
+					ReferenceGrants: referenceGrantInformer.GetStore(),
+					Services:        serviceInformer.GetStore(),
+					Namespaces:      namespaceInformer.GetStore(),
+					Maintenance:     c.maintenance,
+					ClusterName:     c.kubernetesClusterName,
+					ClassConfigs:    c.gatewayClasses,
+				}
+				informersSynced = append(informersSynced, gatewayClassInformer.HasSynced, gatewayInformer.HasSynced, httpRouteInformer.HasSynced, referenceGrantInformer.HasSynced, serviceInformer.HasSynced, namespaceInformer.HasSynced)
+
+				if _, err := c.source.ServerResourcesForGroupVersion("yggdrasil.uswitch.com/v1alpha1"); err != nil {
+					logrus.Warnf("YggdrasilPolicy CRD not available in cluster %s, HTTPRoute policies fall back to annotations: %v", c.kubernetesClusterName, err)
+				} else if policyClient, err := yggdrasilclient.NewForConfig(c.restConfig); err != nil {
+					logrus.Warnf("YggdrasilPolicy client unavailable for cluster %s: %v", c.kubernetesClusterName, err)
+				} else {
+					policyFactory := yggdrasilinformers.NewSharedInformerFactory(policyClient, time.Minute)
+					policyInformer := policyFactory.Yggdrasil().V1alpha1().YggdrasilPolicies().Informer()
+					a.EventsIngresses(ctx, policyInformer)
+					stores.YggdrasilPolicies = policyInformer.GetStore()
+					informersSynced = append(informersSynced, policyInformer.HasSynced)
+				}
+
+				a.gatewayStores = append(a.gatewayStores, stores)
+			}
+		}
 
 		if syncSecrets {
 			tlsFilter := informers.WithTweakListOptions(func(lo *metav1.ListOptions) {

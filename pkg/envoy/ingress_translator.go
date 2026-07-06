@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/uswitch/yggdrasil/pkg/k8s"
+	"github.com/uswitch/yggdrasil/pkg/policy"
 	v1 "k8s.io/api/core/v1"
 )
 
@@ -22,6 +22,7 @@ type UpstreamInfo struct {
 	Namespace   string
 	Class       string
 	ClusterName string
+	SourceKind  string
 	IngressName string
 }
 
@@ -115,6 +116,7 @@ func (v *virtualHost) Equals(other *virtualHost) bool {
 type LBHost struct {
 	Host   string
 	Weight uint32
+	Port   uint32
 }
 
 type cluster struct {
@@ -215,9 +217,15 @@ func (c *cluster) Equals(other *cluster) bool {
 	}
 
 	sort.Slice(c.Hosts[:], func(i, j int) bool {
+		if c.Hosts[i].Host == c.Hosts[j].Host {
+			return c.Hosts[i].Port < c.Hosts[j].Port
+		}
 		return c.Hosts[i].Host < c.Hosts[j].Host
 	})
 	sort.Slice(other.Hosts[:], func(i, j int) bool {
+		if other.Hosts[i].Host == other.Hosts[j].Host {
+			return other.Hosts[i].Port < other.Hosts[j].Port
+		}
 		return other.Hosts[i].Host < other.Hosts[j].Host
 	})
 
@@ -237,8 +245,12 @@ func (cfg *envoyConfiguration) equals(oldCfg *envoyConfiguration) (vmatch bool, 
 	return VirtualHostsEquals(cfg.VirtualHosts, oldCfg.VirtualHosts), ClustersEquals(cfg.Clusters, oldCfg.Clusters)
 }
 
-func classFilter(ingresses []*k8s.Ingress, ingressClass []string) (is []*k8s.Ingress) {
+func classFilter(ingresses []*k8s.SourceRoute, ingressClass []string) (is []*k8s.SourceRoute) {
 	for _, i := range ingresses {
+		if i.Source.Kind == "HTTPRoute" {
+			is = append(is, i)
+			continue
+		}
 		for _, class := range ingressClass {
 			if i.Annotations["kubernetes.io/ingress.class"] == class ||
 				(i.Class != nil && *i.Class == class) {
@@ -250,7 +262,7 @@ func classFilter(ingresses []*k8s.Ingress, ingressClass []string) (is []*k8s.Ing
 	return is
 }
 
-func validIngressFilter(ingresses []*k8s.Ingress) (vi []*k8s.Ingress) {
+func validIngressFilter(ingresses []*k8s.SourceRoute) (vi []*k8s.SourceRoute) {
 Ingress:
 	for _, i := range ingresses {
 		for _, u := range i.Upstreams {
@@ -296,21 +308,21 @@ func newEnvoyIngress(host string, timeouts DefaultTimeouts) *envoyIngress {
 	}
 }
 
-func (ing *envoyIngress) addUpstream(host string, weight uint32) {
+func (ing *envoyIngress) addUpstream(host string, port uint32, weight uint32) {
 	// Check if the host is already in the list
 	// If we wan't to avoid using a for loop, maybe we could implement a Map for a faster lookup.
 	// time complexity O(1) vs 0(n) for each iteration.
 	for _, h := range ing.cluster.Hosts {
-		if h.Host == host {
+		if h.Host == host && h.Port == port {
 			// Host found, so we don't add the duplicate
-			logrus.Debugf("Duplicate host found for upstream, not adding : %s for cluster : %s", host, ing.cluster.Name)
+			logrus.Debugf("Duplicate host found for upstream, not adding : %s:%d for cluster : %s", host, port, ing.cluster.Name)
 			return
 		}
 	}
 
 	// No duplicate found, append the new host
-	ing.cluster.Hosts = append(ing.cluster.Hosts, LBHost{Host: host, Weight: weight})
-	logrus.Debugf("Host added on upstream list : %s for cluster : %s", host, ing.cluster.Name)
+	ing.cluster.Hosts = append(ing.cluster.Hosts, LBHost{Host: host, Port: port, Weight: weight})
+	logrus.Debugf("Host added on upstream list : %s:%d for cluster : %s", host, port, ing.cluster.Name)
 }
 
 func (ing *envoyIngress) addHealthCheckPath(path string) {
@@ -367,17 +379,21 @@ func hostMatch(ruleHost, tlsHost string) bool {
 }
 
 // getHostTlsSecret returns the tls secret configured for a given ingress host
-func getHostTlsSecret(ingress *k8s.Ingress, host string, secrets []*v1.Secret) (*v1.Secret, error) {
+func getHostTlsSecret(ingress *k8s.SourceRoute, host string, secrets []*v1.Secret) (*v1.Secret, error) {
 	for _, tls := range ingress.TLS {
 		// TODO prefer a.a.b tls secret over *.a.b for host a.a.b when both are configured
 		if hostMatch(host, tls.Host) {
+			secretNamespace := tls.SecretNamespace
+			if secretNamespace == "" {
+				secretNamespace = ingress.Namespace
+			}
 			for _, secret := range secrets {
-				if secret.Namespace == ingress.Namespace &&
+				if secret.Namespace == secretNamespace &&
 					secret.Name == tls.SecretName {
 					return secret, nil
 				}
 			}
-			return nil, fmt.Errorf("secret %s/%s not found for host '%s'", ingress.Namespace, tls.SecretName, host)
+			return nil, fmt.Errorf("secret %s/%s not found for host '%s'", secretNamespace, tls.SecretName, host)
 		}
 	}
 	return nil, fmt.Errorf("ingress %s/%s - %s has no tls secret configured", ingress.Namespace, ingress.Name, host)
@@ -420,41 +436,14 @@ func validateTlsSecret(secret *v1.Secret) (bool, error) {
 	return true, nil
 }
 
-func (envoyIng *envoyIngress) addStickySession(ingress *k8s.Ingress) {
-	if ingress.Annotations["yggdrasil.uswitch.com/sticky-sessions"] != "true" {
-		return
-	}
-	cookieName := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-name"]
-	cookiePath := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-path"]
-	cookieTTLStr := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-ttl"]
-
-	if cookieName == "" || cookiePath == "" || cookieTTLStr == "" {
-		logrus.Warnf("sticky-sessions enabled for ingress %s/%s but missing required annotations (cookie-name, cookie-path, cookie-ttl), skipping sticky sessions", ingress.Namespace, ingress.Name)
-		return
-	}
-	cookieTTL, err := time.ParseDuration(cookieTTLStr)
-	if err != nil {
-		logrus.Warnf("invalid sticky-session-cookie-ttl for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
-		return
-	}
+func (envoyIng *envoyIngress) addStickySession(stickySessions *policy.StickySessions) {
 	envoyIng.vhost.StickySession = true
-	envoyIng.vhost.StickySessionCookieName = cookieName
-	envoyIng.vhost.StickySessionCookiePath = cookiePath
-	envoyIng.vhost.StickySessionCookieTTL = cookieTTL
+	envoyIng.vhost.StickySessionCookieName = stickySessions.CookieName
+	envoyIng.vhost.StickySessionCookiePath = stickySessions.CookiePath
+	envoyIng.vhost.StickySessionCookieTTL = stickySessions.CookieTTL
 
-	changeOnFailure := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-change-on-failure"] != "false"
+	changeOnFailure := stickySessions.ChangeOnFailure
 	envoyIng.cluster.StickySessionChangeOnFailure = &changeOnFailure
-}
-
-func (envoyIng *envoyIngress) addRetryOn(ingress *k8s.Ingress) {
-	if ingress.Annotations["yggdrasil.uswitch.com/retry-on"] != "" {
-		retryOn := ingress.Annotations["yggdrasil.uswitch.com/retry-on"]
-		if !ValidateEnvoyRetryOn(retryOn) {
-			logrus.Warnf("invalid retry-on parameter for ingress %s/%s: %s", ingress.Namespace, ingress.Name, retryOn)
-			return
-		}
-		envoyIng.vhost.RetryOn = retryOn
-	}
 }
 
 // isWildcard checks if the given host rule is a wildcard.
@@ -470,10 +459,10 @@ func validateSubdomain(ruleHost, host string) bool {
 	return strings.HasSuffix(host, ruleHost)
 }
 
-func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v1.Secret, timeouts DefaultTimeouts, accessLog string) *envoyConfiguration {
+func translateIngresses(ingresses []*k8s.SourceRoute, syncSecrets bool, secrets []*v1.Secret, timeouts DefaultTimeouts, accessLog string) *envoyConfiguration {
 	cfg := &envoyConfiguration{}
 	envoyIngresses := map[string]*envoyIngress{}
-	ruleHostToIngresses := map[string][]*k8s.Ingress{}
+	ruleHostToIngresses := map[string][]*k8s.SourceRoute{}
 	currentUpstreams := make(map[string]UpstreamInfo)
 
 	for _, i := range ingresses {
@@ -483,6 +472,9 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 	}
 
 	for ruleHost, ingressList := range ruleHostToIngresses {
+		sort.SliceStable(ingressList, func(i, j int) bool {
+			return sourceKindPriority(ingressList[i]) < sourceKindPriority(ingressList[j])
+		})
 		isWildcard := isWildcard(ruleHost)
 
 		if _, ok := envoyIngresses[ruleHost]; !ok {
@@ -502,13 +494,20 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 
 		// Add upstreams based on maintenance status
 		for _, ingress := range ingressList {
-			for _, j := range ingress.Upstreams {
+			upstreams := ingress.UpstreamEndpoints
+			if len(upstreams) == 0 {
+				for _, upstream := range ingress.Upstreams {
+					upstreams = append(upstreams, k8s.UpstreamEndpoint{Host: upstream})
+				}
+			}
+			for _, upstream := range upstreams {
+				j := upstream.Host
 				// Skip this upstream if cluster is in maintenance but keep it if no other cluster can serve it
 				if !hasNonMaintenance || !ingress.Maintenance {
 					// Check if the upstream is already added
 					exists := false
 					for _, host := range envoyIngress.cluster.Hosts {
-						if host.Host == j {
+						if host.Host == j && host.Port == upstream.Port {
 							exists = true
 							break
 						}
@@ -521,115 +520,45 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 					if ingress.Class != nil {
 						class = *ingress.Class
 					}
-
-					// Add upstream
-					if weight64, err := strconv.ParseUint(ingress.Annotations["yggdrasil.uswitch.com/weight"], 10, 32); err == nil {
-						if weight64 != 0 {
-							envoyIngress.addUpstream(j, uint32(weight64))
-						}
-					} else {
-						envoyIngress.addUpstream(j, 1)
+					sourceKind := ingress.Source.Kind
+					if sourceKind == "" {
+						sourceKind = "Ingress"
 					}
-					upstreamKey := fmt.Sprintf("%s-%s", ruleHost, j)
+
+					// Add upstream; an explicit weight of 0 excludes the upstream
+					weight := uint32(1)
+					if ingress.Policy != nil && ingress.Policy.Weight != nil {
+						weight = *ingress.Policy.Weight
+					}
+					if weight != 0 {
+						envoyIngress.addUpstream(j, upstream.Port, weight)
+					}
+					upstreamKey := fmt.Sprintf("%s-%s-%d", ruleHost, j, upstream.Port)
 					currentUpstreams[upstreamKey] = UpstreamInfo{
 						RuleHost:    strings.ReplaceAll(ruleHost, ".", "_"),
 						Upstream:    j,
 						Namespace:   ingress.Namespace,
 						Class:       class,
 						ClusterName: ingress.KubernetesClusterName,
+						SourceKind:  sourceKind,
 						IngressName: ingress.Name,
 					}
 
-					EnvoyUpstreamInfo.WithLabelValues(strings.ReplaceAll(ruleHost, ".", "_"), j, ingress.Namespace, class, ingress.KubernetesClusterName, ingress.Name).Set(float64(1))
+					EnvoyUpstreamInfo.WithLabelValues(strings.ReplaceAll(ruleHost, ".", "_"), j, ingress.Namespace, class, ingress.KubernetesClusterName, sourceKind, ingress.Name).Set(float64(1))
 				} else {
 					logrus.Warnf("Endpoint is in maintenance mode, upstream %s will not be added for host %s", j, ruleHost)
 				}
 			}
 
-			if isWildcard {
-				if ingress.Annotations["yggdrasil.uswitch.com/healthcheck-host"] != "" {
-					envoyIngress.addHealthCheckHost(ingress.Annotations["yggdrasil.uswitch.com/healthcheck-host"])
-					if !validateSubdomain(ruleHost, envoyIngress.cluster.HealthCheckHost) {
-						logrus.Warnf("Healthcheck %s is not on the same subdomain for %s, annotation will be skipped", envoyIngress.cluster.HealthCheckHost, ruleHost)
-						envoyIngress.cluster.HealthCheckHost = ruleHost
-					}
-				} else {
-					logrus.Warnf("Be careful, healthcheck can't work for wildcard host : %s", envoyIngress.cluster.HealthCheckHost)
-				}
+			if ingress.Maintenance && hasNonMaintenance {
+				continue
 			}
 
-			if ingress.Annotations["yggdrasil.uswitch.com/healthcheck-path"] != "" {
-				envoyIngress.addHealthCheckPath(ingress.Annotations["yggdrasil.uswitch.com/healthcheck-path"])
-			}
+			applyRoutePolicy(envoyIngress, ingress.Policy, ruleHost, isWildcard)
 
-			if ingress.Annotations["yggdrasil.uswitch.com/timeout"] != "" {
-				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/timeout"])
-				if err == nil {
-					envoyIngress.addTimeout(timeout)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/cluster-timeout"] != "" {
-				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/cluster-timeout"])
-				if err == nil {
-					envoyIngress.setClusterTimeout(timeout)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/route-timeout"] != "" {
-				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/route-timeout"])
-				if err == nil {
-					envoyIngress.setRouteTimeout(timeout)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/per-try-timeout"] != "" {
-				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/per-try-timeout"])
-				if err == nil {
-					envoyIngress.setPerTryTimeout(timeout)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"] != "" {
-				// TODO validate, add error path
-				envoyIngress.setUpstreamHttpVersion(ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"])
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/idle-timeout"] != "" {
-				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/idle-timeout"])
-				if err == nil {
-					envoyIngress.cluster.IdleTimeout = &timeout
-				} else {
-					logrus.Warnf("invalid idle-timeout for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/max-connection-duration"] != "" {
-				dur, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/max-connection-duration"])
-				if err == nil {
-					envoyIngress.cluster.MaxConnectionDuration = &dur
-				} else {
-					logrus.Warnf("invalid max-connection-duration for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
-				}
-			}
-
-			if ingress.Annotations["yggdrasil.uswitch.com/max-requests-per-connection"] != "" {
-				val, err := strconv.ParseUint(ingress.Annotations["yggdrasil.uswitch.com/max-requests-per-connection"], 10, 32)
-				if err == nil {
-					v := uint32(val)
-					envoyIngress.cluster.MaxRequestsPerConnection = &v
-				} else {
-					logrus.Warnf("invalid max-requests-per-connection for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
-				}
-			}
-
-			envoyIngress.addRetryOn(ingress)
-
-			envoyIngress.addStickySession(ingress)
-
-			if syncSecrets && envoyIngress.vhost.TlsKey == "" && envoyIngress.vhost.TlsCert == "" {
+			if syncSecrets {
 				if hostTlsSecret, err := getHostTlsSecret(ingress, ruleHost, secrets); err != nil {
-					logrus.Infof(err.Error())
+					logrus.Infof("%s", err.Error())
 				} else {
 					valid, err := validateTlsSecret(hostTlsSecret)
 					if err != nil {
@@ -646,7 +575,7 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 	// Identify and remove upstreams that no longer exist
 	for upstreamKey, info := range previousUpstreams {
 		if _, exists := currentUpstreams[upstreamKey]; !exists {
-			EnvoyUpstreamInfo.DeleteLabelValues(info.RuleHost, info.Upstream, info.Namespace, info.Class, info.ClusterName, info.IngressName)
+			EnvoyUpstreamInfo.DeleteLabelValues(info.RuleHost, info.Upstream, info.Namespace, info.Class, info.ClusterName, info.SourceKind, info.IngressName)
 		}
 	}
 
@@ -663,4 +592,70 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 	numClusters.Set(float64(len(cfg.Clusters)))
 
 	return cfg
+}
+
+// applyRoutePolicy maps the shared RoutePolicy model onto the generated Envoy
+// virtual host and cluster. It is the only place route policy influences
+// Envoy generation, whatever Policy Source the policy came from.
+func applyRoutePolicy(envoyIng *envoyIngress, routePolicy *policy.RoutePolicy, ruleHost string, isWildcard bool) {
+	if isWildcard {
+		if routePolicy != nil && routePolicy.HealthCheckHost != nil {
+			envoyIng.addHealthCheckHost(*routePolicy.HealthCheckHost)
+			if !validateSubdomain(ruleHost, envoyIng.cluster.HealthCheckHost) {
+				logrus.Warnf("Healthcheck %s is not on the same subdomain for %s, it will be skipped", envoyIng.cluster.HealthCheckHost, ruleHost)
+				envoyIng.cluster.HealthCheckHost = ruleHost
+			}
+		} else {
+			logrus.Warnf("Be careful, healthcheck can't work for wildcard host : %s", envoyIng.cluster.HealthCheckHost)
+		}
+	}
+
+	if routePolicy == nil {
+		return
+	}
+
+	if routePolicy.HealthCheckPath != nil {
+		envoyIng.addHealthCheckPath(*routePolicy.HealthCheckPath)
+	}
+	if routePolicy.Timeout != nil {
+		envoyIng.addTimeout(*routePolicy.Timeout)
+	}
+	if routePolicy.ClusterTimeout != nil {
+		envoyIng.setClusterTimeout(*routePolicy.ClusterTimeout)
+	}
+	if routePolicy.RouteTimeout != nil {
+		envoyIng.setRouteTimeout(*routePolicy.RouteTimeout)
+	}
+	if routePolicy.PerTryTimeout != nil {
+		envoyIng.setPerTryTimeout(*routePolicy.PerTryTimeout)
+	}
+	if routePolicy.UpstreamHTTPVersion != nil {
+		envoyIng.setUpstreamHttpVersion(*routePolicy.UpstreamHTTPVersion)
+	}
+	if routePolicy.IdleTimeout != nil {
+		timeout := *routePolicy.IdleTimeout
+		envoyIng.cluster.IdleTimeout = &timeout
+	}
+	if routePolicy.MaxConnectionDuration != nil {
+		duration := *routePolicy.MaxConnectionDuration
+		envoyIng.cluster.MaxConnectionDuration = &duration
+	}
+	if routePolicy.MaxRequestsPerConnection != nil {
+		maxRequests := *routePolicy.MaxRequestsPerConnection
+		envoyIng.cluster.MaxRequestsPerConnection = &maxRequests
+	}
+	if len(routePolicy.RetryOn) > 0 {
+		envoyIng.vhost.RetryOn = strings.Join(routePolicy.RetryOn, ",")
+	}
+	if routePolicy.StickySessions != nil {
+		envoyIng.addStickySession(routePolicy.StickySessions)
+	}
+}
+
+func sourceKindPriority(ingress *k8s.SourceRoute) int {
+	// Gateway API policy is applied after Ingress policy so HTTPRoute annotations win on same-host migrations.
+	if ingress.Source.Kind == "HTTPRoute" {
+		return 1
+	}
+	return 0
 }

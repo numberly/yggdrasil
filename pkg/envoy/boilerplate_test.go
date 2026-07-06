@@ -10,9 +10,29 @@ import (
 	eal "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
 	stateful_session "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/stateful_session/v3"
 	cookie_session "github.com/envoyproxy/go-control-plane/envoy/extensions/http/stateful_session/cookie/v3"
+	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	envoy_extension_http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/golang/protobuf/ptypes/duration"
 )
+
+func TestMakeClusterUpstreamTLSHasNoSNI(t *testing.T) {
+	c := cluster{VirtualHost: "test.example.com", Hosts: []LBHost{{Host: "host1", Weight: 1}}}
+	addresses := []*core.Address{
+		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
+	}
+	result := makeCluster(c, "/etc/ssl/ca.pem", UpstreamHealthCheck{}, -1, addresses)
+
+	if result.TransportSocket == nil {
+		t.Fatal("expected TransportSocket to be set")
+	}
+	var tlsCtx auth.UpstreamTlsContext
+	if err := result.TransportSocket.GetTypedConfig().UnmarshalTo(&tlsCtx); err != nil {
+		t.Fatalf("failed to unmarshal UpstreamTlsContext: %s", err)
+	}
+	if tlsCtx.Sni != "" {
+		t.Errorf("expected empty SNI, got %q", tlsCtx.Sni)
+	}
+}
 
 func TestMakeHealthChecksEmptyPath(t *testing.T) {
 	healthChecks := makeHealthChecks("example.com", "", UpstreamHealthCheck{})
@@ -174,7 +194,7 @@ func TestMakeClusterWithStickySessionOverrideHost(t *testing.T) {
 		Name:                         "test_cluster",
 		VirtualHost:                  "test.example.com",
 		Timeout:                      5 * time.Second,
-		Hosts:                        []LBHost{{"host1", 1}},
+		Hosts:                        []LBHost{{Host: "host1", Weight: 1}},
 		StickySessionChangeOnFailure: boolPtr(false),
 	}
 	addresses := []*core.Address{
@@ -205,7 +225,7 @@ func TestMakeClusterWithoutStickySessionOverrideHost(t *testing.T) {
 		Name:                         "test_cluster",
 		VirtualHost:                  "test.example.com",
 		Timeout:                      5 * time.Second,
-		Hosts:                        []LBHost{{"host1", 1}},
+		Hosts:                        []LBHost{{Host: "host1", Weight: 1}},
 		StickySessionChangeOnFailure: boolPtr(true),
 	}
 	addresses := []*core.Address{
@@ -223,7 +243,7 @@ func TestMakeClusterWithStickySessionNil(t *testing.T) {
 		Name:        "test_cluster",
 		VirtualHost: "test.example.com",
 		Timeout:     5 * time.Second,
-		Hosts:       []LBHost{{"host1", 1}},
+		Hosts:       []LBHost{{Host: "host1", Weight: 1}},
 	}
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
@@ -258,7 +278,7 @@ func TestMakeClusterDefaultHttpProtocolOptions(t *testing.T) {
 		Name:        "test_cluster",
 		VirtualHost: "test.example.com",
 		Timeout:     5 * time.Second,
-		Hosts:       []LBHost{{"host1", 1}},
+		Hosts:       []LBHost{{Host: "host1", Weight: 1}},
 	}
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
@@ -300,7 +320,7 @@ func TestMakeClusterCustomHttpProtocolOptions(t *testing.T) {
 		Name:                     "test_cluster",
 		VirtualHost:              "test.example.com",
 		Timeout:                  5 * time.Second,
-		Hosts:                    []LBHost{{"host1", 1}},
+		Hosts:                    []LBHost{{Host: "host1", Weight: 1}},
 		IdleTimeout:              &idleTimeout,
 		MaxConnectionDuration:    &maxConnDur,
 		MaxRequestsPerConnection: &maxReqs,

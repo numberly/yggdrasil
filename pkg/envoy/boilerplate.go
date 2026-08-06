@@ -482,14 +482,14 @@ func makeHealthChecks(upstreamVHost string, healthPath string, config UpstreamHe
 func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPercentage int32, addresses []*core.Address) *v3cluster.Cluster {
 
 	tls := &auth.UpstreamTlsContext{}
-	if ca != "" {
+	trustedCa := &core.DataSource{Specifier: &core.DataSource_Filename{Filename: ca}}
+	if c.authTLSTrustedCa != "" {
+		trustedCa = &core.DataSource{Specifier: &core.DataSource_InlineString{InlineString: c.authTLSTrustedCa}}
+	}
+	if ca != "" || c.authTLSTrustedCa != "" {
 		tls.CommonTlsContext = &auth.CommonTlsContext{
 			ValidationContextType: &auth.CommonTlsContext_ValidationContext{
-				ValidationContext: &auth.CertificateValidationContext{
-					TrustedCa: &core.DataSource{
-						Specifier: &core.DataSource_Filename{Filename: ca},
-					},
-				},
+				ValidationContext: &auth.CertificateValidationContext{TrustedCa: trustedCa},
 			},
 		}
 		if c.authTLSVerifyClient == "true" {

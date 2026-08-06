@@ -615,6 +615,7 @@ func TestTranslateIngressesWithMTLSAnnotations(t *testing.T) {
 				Namespace: "default",
 			},
 			Data: map[string][]byte{
+				"ca.crt":  []byte("dummy-ca"),
 				"tls.crt": []byte("dummy-cert"),
 				"tls.key": []byte("dummy-key"),
 			},
@@ -637,6 +638,26 @@ func TestTranslateIngressesWithMTLSAnnotations(t *testing.T) {
 	}
 	if cfg.Clusters[0].authTLSVerifyClient != "true" {
 		t.Errorf("Expected authTLSVerifyClient to be true")
+	}
+	if cfg.VirtualHosts[0].TrustedCa != "dummy-ca" || cfg.Clusters[0].authTLSTrustedCa != "dummy-ca" {
+		t.Errorf("Expected mTLS CA to be propagated to downstream and upstream TLS contexts")
+	}
+	if cfg.Clusters[0].authTLSEnvoyClientCert != "dummy-cert" || cfg.Clusters[0].authTLSEnvoyClientKey != "dummy-key" {
+		t.Errorf("Expected Envoy client certificate to be propagated")
+	}
+}
+
+func TestMTLSSecretRotationChangesConfiguration(t *testing.T) {
+	oldVhost := &virtualHost{Host: "example.com", TrustedCa: "old-ca"}
+	newVhost := &virtualHost{Host: "example.com", TrustedCa: "new-ca"}
+	if oldVhost.Equals(newVhost) {
+		t.Fatal("rotated mTLS CA must update the listener configuration")
+	}
+
+	oldCluster := &cluster{Name: "example_com", authTLSTrustedCa: "old-ca", authTLSEnvoyClientCert: "old-cert", authTLSEnvoyClientKey: "old-key"}
+	newCluster := &cluster{Name: "example_com", authTLSTrustedCa: "new-ca", authTLSEnvoyClientCert: "new-cert", authTLSEnvoyClientKey: "new-key"}
+	if oldCluster.Equals(newCluster) {
+		t.Fatal("rotated mTLS credentials must update the cluster configuration")
 	}
 }
 

@@ -226,6 +226,18 @@ func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyCon
 				logrus.Warnf("skipping vhost because of no certificate: %s", virtualHost.Host)
 			} else {
 				logrus.Infof("using default certificate for %s", virtualHost.Host)
+				if virtualHost.TrustedCa != "" {
+					filterChain, err := c.makeFilterChain(Certificate{
+						Hosts:     []string{virtualHost.Host},
+						Cert:      c.certificates[0].Cert,
+						Key:       c.certificates[0].Key,
+						TrustedCa: virtualHost.TrustedCa,
+					}, []*route.VirtualHost{envoyVhost}, config.AccessLog)
+					if err != nil {
+						return nil, err
+					}
+					filterChains = append(filterChains, &filterChain)
+				}
 			}
 			continue
 		}

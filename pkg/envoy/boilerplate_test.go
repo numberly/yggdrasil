@@ -8,6 +8,7 @@ import (
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	eal "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
+	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/golang/protobuf/ptypes/duration"
 )
 
@@ -97,6 +98,34 @@ func TestAccessLoggerConfig(t *testing.T) {
 				t.Errorf("Log format map should match configuration")
 			}
 		})
+	}
+}
+
+func TestMakeClusterUsesIngressMTLSCA(t *testing.T) {
+	cluster := makeCluster(cluster{
+		Name:                   "app",
+		VirtualHost:            "app.example.com",
+		Timeout:                time.Second,
+		Hosts:                  []LBHost{{Host: "backend", Weight: 1}},
+		authTLSVerifyClient:    "true",
+		authTLSTrustedCa:       "ingress-ca",
+		authTLSEnvoyClientCert: "client-cert",
+		authTLSEnvoyClientKey:  "client-key",
+	}, "", UpstreamHealthCheck{}, 0, makeAddresses([]LBHost{{Host: "backend", Weight: 1}}, 443))
+
+	config, err := cluster.TransportSocket.GetTypedConfig().UnmarshalNew()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tls, ok := config.(*auth.UpstreamTlsContext)
+	if !ok {
+		t.Fatalf("expected UpstreamTlsContext, got %T", config)
+	}
+	if tls.Sni != "app.example.com" || tls.CommonTlsContext.GetValidationContext().GetTrustedCa().GetInlineString() != "ingress-ca" {
+		t.Fatal("expected upstream mTLS context to use the ingress CA and SNI")
+	}
+	if len(tls.CommonTlsContext.TlsCertificates) != 1 || tls.CommonTlsContext.TlsCertificates[0].GetCertificateChain().GetInlineString() != "client-cert" {
+		t.Fatal("expected upstream mTLS context to include Envoy's client certificate")
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	tcache "github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/uswitch/yggdrasil/pkg/k8s"
 	v1 "k8s.io/api/core/v1"
@@ -163,6 +164,35 @@ func TestGenerateIntoTwoCerts(t *testing.T) {
 
 	assertNumberOfVirtualHosts(t, listener.FilterChains[1], 1)
 	assertServerNames(t, listener.FilterChains[1], nil)
+}
+
+func TestDynamicTLSFallbackRetainsMTLS(t *testing.T) {
+	configurator := NewKubernetesConfigurator("a", []Certificate{{Hosts: []string{"*"}, Cert: "cert", Key: "key"}}, "", nil, "/var/log/envoy/", WithSyncSecrets(true), func(c *KubernetesConfigurator) {
+		c.envoyListenerIpv4Address = []string{"1.1.1.1"}
+	})
+
+	resources, err := configurator.generateDynamicTLSFilterChains(&envoyConfiguration{VirtualHosts: []*virtualHost{{
+		Host: "app.example.com", UpstreamCluster: "app", Timeout: time.Second, PerTryTimeout: time.Second, TrustedCa: "client-ca",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, filterChain := range resources {
+		if len(filterChain.FilterChainMatch.ServerNames) != 1 || filterChain.FilterChainMatch.ServerNames[0] != "app.example.com" {
+			continue
+		}
+		config, err := filterChain.TransportSocket.GetTypedConfig().UnmarshalNew()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tls, ok := config.(*auth.DownstreamTlsContext)
+		if !ok || !tls.GetRequireClientCertificate().GetValue() || tls.GetCommonTlsContext().GetValidationContext().GetTrustedCa().GetInlineString() != "client-ca" {
+			t.Fatal("default certificate fallback must retain client certificate validation")
+		}
+		return
+	}
+	t.Fatal("expected a host-specific fallback mTLS filter chain")
 }
 
 func TestGenerateListeners(t *testing.T) {

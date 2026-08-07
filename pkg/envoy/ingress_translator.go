@@ -88,6 +88,11 @@ type virtualHost struct {
 	TlsCert         string
 	TrustedCa       string // CA certificate for mTLS downstream
 	RetryOn         string
+
+	StickySession           bool
+	StickySessionCookieName string
+	StickySessionCookiePath string
+	StickySessionCookieTTL  time.Duration
 }
 
 func (v *virtualHost) Equals(other *virtualHost) bool {
@@ -102,7 +107,11 @@ func (v *virtualHost) Equals(other *virtualHost) bool {
 		v.TlsKey == other.TlsKey &&
 		v.TlsCert == other.TlsCert &&
 		v.TrustedCa == other.TrustedCa &&
-		v.RetryOn == other.RetryOn
+		v.RetryOn == other.RetryOn &&
+		v.StickySession == other.StickySession &&
+		v.StickySessionCookieName == other.StickySessionCookieName &&
+		v.StickySessionCookiePath == other.StickySessionCookiePath &&
+		v.StickySessionCookieTTL == other.StickySessionCookieTTL
 }
 
 type LBHost struct {
@@ -111,18 +120,52 @@ type LBHost struct {
 }
 
 type cluster struct {
-	Name                   string
-	VirtualHost            string
-	HealthCheckPath        string
-	HealthCheckHost        string // with Wildcard, the HealthCheck host can be different than the VirtualHost
-	HttpVersion            string
-	Timeout                time.Duration
-	Hosts                  []LBHost
-	authTLSSecret          string // the secret name of the CA : could be "ca-secret"
-	authTLSVerifyClient    string // Verify or not the client cert (can be either true or false)
-	authTLSTrustedCa       string // CA used by Envoy to verify the upstream
-	authTLSEnvoyClientCert string // the envoy cert, if authTLSSecret is set, this will be used for mTLS between envoy and the backend
-	authTLSEnvoyClientKey  string // the envoy key, if authTLSSecret is set, this will be used for mTLS between envoy and the backend
+	Name                         string
+	VirtualHost                  string
+	HealthCheckPath              string
+	HealthCheckHost              string // with Wildcard, the HealthCheck host can be different than the VirtualHost
+	HttpVersion                  string
+	Timeout                      time.Duration
+	Hosts                        []LBHost
+	authTLSSecret                string // the secret name of the CA : could be "ca-secret"
+	authTLSVerifyClient          string // Verify or not the client cert (can be either true or false)
+	authTLSTrustedCa             string // CA used by Envoy to verify the upstream
+	authTLSEnvoyClientCert       string // the envoy cert, if authTLSSecret is set, this will be used for mTLS between envoy and the backend
+	authTLSEnvoyClientKey        string // the envoy key, if authTLSSecret is set, this will be used for mTLS between envoy and the backend
+	StickySessionChangeOnFailure *bool // nil = not set (sticky sessions disabled), false = persist to unhealthy backend
+	IdleTimeout                  *time.Duration
+	MaxConnectionDuration        *time.Duration
+	MaxRequestsPerConnection     *uint32
+}
+
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func durationPtrEqual(a, b *time.Duration) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func uint32PtrEqual(a, b *uint32) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 
 func (c *cluster) identity() string {
@@ -170,6 +213,22 @@ func (c *cluster) Equals(other *cluster) bool {
 	}
 
 	if c.HttpVersion != other.HttpVersion {
+		return false
+	}
+
+	if !boolPtrEqual(c.StickySessionChangeOnFailure, other.StickySessionChangeOnFailure) {
+		return false
+	}
+
+	if !durationPtrEqual(c.IdleTimeout, other.IdleTimeout) {
+		return false
+	}
+
+	if !durationPtrEqual(c.MaxConnectionDuration, other.MaxConnectionDuration) {
+		return false
+	}
+
+	if !uint32PtrEqual(c.MaxRequestsPerConnection, other.MaxRequestsPerConnection) {
 		return false
 	}
 
@@ -416,6 +475,32 @@ func validateTlsSecret(secret *v1.Secret) (bool, error) {
 	return true, nil
 }
 
+func (envoyIng *envoyIngress) addStickySession(ingress *k8s.Ingress) {
+	if ingress.Annotations["yggdrasil.uswitch.com/sticky-sessions"] != "true" {
+		return
+	}
+	cookieName := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-name"]
+	cookiePath := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-path"]
+	cookieTTLStr := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-ttl"]
+
+	if cookieName == "" || cookiePath == "" || cookieTTLStr == "" {
+		logrus.Warnf("sticky-sessions enabled for ingress %s/%s but missing required annotations (cookie-name, cookie-path, cookie-ttl), skipping sticky sessions", ingress.Namespace, ingress.Name)
+		return
+	}
+	cookieTTL, err := time.ParseDuration(cookieTTLStr)
+	if err != nil {
+		logrus.Warnf("invalid sticky-session-cookie-ttl for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
+		return
+	}
+	envoyIng.vhost.StickySession = true
+	envoyIng.vhost.StickySessionCookieName = cookieName
+	envoyIng.vhost.StickySessionCookiePath = cookiePath
+	envoyIng.vhost.StickySessionCookieTTL = cookieTTL
+
+	changeOnFailure := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-change-on-failure"] != "false"
+	envoyIng.cluster.StickySessionChangeOnFailure = &changeOnFailure
+}
+
 func (envoyIng *envoyIngress) addRetryOn(ingress *k8s.Ingress) {
 	if ingress.Annotations["yggdrasil.uswitch.com/retry-on"] != "" {
 		retryOn := ingress.Annotations["yggdrasil.uswitch.com/retry-on"]
@@ -603,7 +688,37 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 				}
 			}
 
+			if ingress.Annotations["yggdrasil.uswitch.com/idle-timeout"] != "" {
+				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/idle-timeout"])
+				if err == nil {
+					envoyIngress.cluster.IdleTimeout = &timeout
+				} else {
+					logrus.Warnf("invalid idle-timeout for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
+				}
+			}
+
+			if ingress.Annotations["yggdrasil.uswitch.com/max-connection-duration"] != "" {
+				dur, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/max-connection-duration"])
+				if err == nil {
+					envoyIngress.cluster.MaxConnectionDuration = &dur
+				} else {
+					logrus.Warnf("invalid max-connection-duration for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
+				}
+			}
+
+			if ingress.Annotations["yggdrasil.uswitch.com/max-requests-per-connection"] != "" {
+				val, err := strconv.ParseUint(ingress.Annotations["yggdrasil.uswitch.com/max-requests-per-connection"], 10, 32)
+				if err == nil {
+					v := uint32(val)
+					envoyIngress.cluster.MaxRequestsPerConnection = &v
+				} else {
+					logrus.Warnf("invalid max-requests-per-connection for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
+				}
+			}
+
 			envoyIngress.addRetryOn(ingress)
+
+			envoyIngress.addStickySession(ingress)
 
 			if syncSecrets && envoyIngress.vhost.TlsKey == "" && envoyIngress.vhost.TlsCert == "" {
 				if hostTlsSecret, err := getHostTlsSecret(ingress, ruleHost, secrets); err != nil {

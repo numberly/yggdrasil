@@ -530,18 +530,9 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 		trustedCa = &core.DataSource{Specifier: &core.DataSource_InlineString{InlineString: c.authTLSTrustedCa}}
 	}
 	if ca != "" || c.authTLSTrustedCa != "" {
-		validationContext := &auth.CertificateValidationContext{TrustedCa: trustedCa}
-		if c.authTLSVerifyClient == "true" {
-			validationContext.MatchTypedSubjectAltNames = []*auth.SubjectAltNameMatcher{{
-				SanType: auth.SubjectAltNameMatcher_DNS,
-				Matcher: &matcherv3.StringMatcher{
-					MatchPattern: &matcherv3.StringMatcher_Exact{Exact: c.VirtualHost},
-				},
-			}}
-		}
 		tls.CommonTlsContext = &auth.CommonTlsContext{
 			ValidationContextType: &auth.CommonTlsContext_ValidationContext{
-				ValidationContext: validationContext,
+				ValidationContext: &auth.CertificateValidationContext{TrustedCa: trustedCa},
 			},
 		}
 		if c.authTLSVerifyClient == "true" {

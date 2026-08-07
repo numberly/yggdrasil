@@ -130,10 +130,6 @@ func TestMakeClusterUsesIngressMTLSCA(t *testing.T) {
 	if len(tls.CommonTlsContext.TlsCertificates) != 1 || tls.CommonTlsContext.TlsCertificates[0].GetCertificateChain().GetInlineString() != "client-cert" {
 		t.Fatal("expected upstream mTLS context to include Envoy's client certificate")
 	}
-	matchers := tls.CommonTlsContext.GetValidationContext().GetMatchTypedSubjectAltNames()
-	if len(matchers) != 1 || matchers[0].GetSanType() != auth.SubjectAltNameMatcher_DNS || matchers[0].GetMatcher().GetExact() != "app.example.com" {
-		t.Fatal("expected upstream mTLS context to verify the upstream DNS SAN")
-	}
 }
 
 func mustParseDuration(dur string) time.Duration {

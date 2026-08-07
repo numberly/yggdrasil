@@ -2,6 +2,7 @@ package envoy
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,9 @@ func (c *KubernetesConfigurator) Generate(ingresses []*k8s.Ingress, secrets []*v
 	defer c.Unlock()
 
 	validIngresses := validIngressFilter(classFilter(ingresses, c.ingressClasses))
+	if err := validateMTLSIngresses(validIngresses, secrets, c.syncSecrets); err != nil {
+		return cache.Snapshot{}, err
+	}
 	config := translateIngresses(validIngresses, c.syncSecrets, secrets, c.defaultTimeouts, c.accessLog)
 
 	vmatch, cmatch := config.equals(c.previousConfig)
@@ -156,6 +160,39 @@ func (c *KubernetesConfigurator) NodeID() string {
 }
 
 var errNoCertificateMatch = errors.New("no certificate match")
+
+func validateMTLSIngresses(ingresses []*k8s.Ingress, secrets []*v1.Secret, syncSecrets bool) error {
+	policies := map[string]string{}
+	for _, ingress := range ingresses {
+		verifyClient := ingress.Annotations["yggdrasil.uswitch.com/auth-tls-verify-client"]
+		secretName := ""
+		switch verifyClient {
+		case "", "false":
+		case "true":
+			if !syncSecrets {
+				return errors.New("mTLS requires syncSecrets: true")
+			}
+			secret, err := getCaTlsSecret(ingress, secrets)
+			if err != nil {
+				return err
+			}
+			if len(secret.Data["ca.crt"]) == 0 || len(secret.Data["tls.crt"]) == 0 || len(secret.Data["tls.key"]) == 0 {
+				return fmt.Errorf("auth-tls-secret %s/%s must contain ca.crt, tls.crt, and tls.key", secret.Namespace, secret.Name)
+			}
+			secretName = secret.Namespace + "/" + secret.Name
+		default:
+			return fmt.Errorf("auth-tls-verify-client must be true or false for ingress %s/%s", ingress.Namespace, ingress.Name)
+		}
+
+		for _, host := range ingress.RulesHosts {
+			if policy, ok := policies[host]; ok && policy != secretName {
+				return fmt.Errorf("conflicting mTLS policies for host %s", host)
+			}
+			policies[host] = secretName
+		}
+	}
+	return nil
+}
 
 func compareHosts(pattern, host string) bool {
 	patternParts := strings.Split(pattern, ".")
@@ -219,7 +256,9 @@ func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyCon
 		if err != nil {
 			return nil, err
 		}
-		allVhosts = append(allVhosts, envoyVhost)
+		if virtualHost.TrustedCa == "" {
+			allVhosts = append(allVhosts, envoyVhost)
+		}
 
 		if virtualHost.TlsCert == "" || virtualHost.TlsKey == "" {
 			if len(c.certificates) == 0 {
@@ -254,7 +293,7 @@ func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyCon
 		filterChains = append(filterChains, &filterChain)
 	}
 
-	if len(c.certificates) == 1 {
+	if len(c.certificates) == 1 && len(allVhosts) > 0 {
 		defaultCert := Certificate{
 			Hosts: []string{"*"},
 			Cert:  c.certificates[0].Cert,
@@ -302,23 +341,39 @@ func (c *KubernetesConfigurator) generateHTTPFilterChain(config *envoyConfigurat
 
 func (c *KubernetesConfigurator) generateTLSFilterChains(config *envoyConfiguration) ([]*listener.FilterChain, error) {
 	virtualHostsForCertificates := make([][]*route.VirtualHost, len(c.certificates))
+	filterChains := []*listener.FilterChain{}
 
 	for _, virtualHost := range config.VirtualHosts {
 		certificateIndicies, err := c.matchCertificateIndices(virtualHost)
 		if err != nil {
 			log.Printf("error matching certificate for '%s': %v", virtualHost.Host, err)
-		} else {
-			for _, idx := range certificateIndicies {
-				vhost, err := makeVirtualHost(virtualHost, c.hostSelectionRetryAttempts, c.defaultRetryOn)
-				if err != nil {
-					return nil, err
-				}
+			continue
+		}
+		if virtualHost.TrustedCa != "" && len(certificateIndicies) > 1 {
+			return nil, fmt.Errorf("mTLS host %s matches multiple static certificates", virtualHost.Host)
+		}
+
+		vhost, err := makeVirtualHost(virtualHost, c.hostSelectionRetryAttempts, c.defaultRetryOn)
+		if err != nil {
+			return nil, err
+		}
+		for _, idx := range certificateIndicies {
+			if virtualHost.TrustedCa == "" {
 				virtualHostsForCertificates[idx] = append(virtualHostsForCertificates[idx], vhost)
+				continue
 			}
+
+			certificate := c.certificates[idx]
+			certificate.Hosts = []string{virtualHost.Host}
+			certificate.TrustedCa = virtualHost.TrustedCa
+			filterChain, err := c.makeFilterChain(certificate, []*route.VirtualHost{vhost}, config.AccessLog)
+			if err != nil {
+				return nil, err
+			}
+			filterChains = append(filterChains, &filterChain)
 		}
 	}
 
-	filterChains := []*listener.FilterChain{}
 	for idx, certificate := range c.certificates {
 		virtualHosts := virtualHostsForCertificates[idx]
 

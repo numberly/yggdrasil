@@ -112,11 +112,13 @@ Allows for adjusting the [load balancer weights](https://www.envoyproxy.io/docs/
 Allows overwriting the default retry policy's [config.route.v3.RetryPolicy.RetryOn](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-retrypolicy-retry-on) set by the `--retry-on` flag (default 5xx). Accepts a comma-separated list of retry-on policies.
 
 ### mTLS
-Used to enable mTLS between client and Envoy.
+Used to enable mTLS between the client, Envoy, and the upstream.
 
-The `yggdrasil.uswitch.com/auth-tls-verify-client` annotation allow you enable or disable mTLS, can be either `true` or `false` (default).
+Set `syncSecrets: true`. Yggdrasil then watches the TLS secrets that provide mTLS certificates and updates Envoy after a secret rotation.
 
-The `yggdrasil.uswitch.com/auth-tls-secret` annotation allow you to specify the name of the Kubernetes TLS secret containing the CA certificate used to verify client certificates.
+The `yggdrasil.uswitch.com/auth-tls-verify-client` annotation enables or disables mTLS. It accepts `true` or `false` (default).
+
+The `yggdrasil.uswitch.com/auth-tls-secret` annotation specifies a `kubernetes.io/tls` secret in the same namespace. The secret must contain `ca.crt`, `tls.crt`, and `tls.key`. Envoy uses `ca.crt` to verify downstream client certificates and upstream server certificates. It uses `tls.crt` and `tls.key` as its upstream client certificate.
 
 ### Example
 Below is an example of an ingress with some of the annotations specified

@@ -166,6 +166,72 @@ func TestGenerateIntoTwoCerts(t *testing.T) {
 	assertServerNames(t, listener.FilterChains[1], nil)
 }
 
+func TestValidateMTLSIngressesRejectsUnsafeConfiguration(t *testing.T) {
+	mtlsIngress := newGenericIngress("mtls.example.com", "backend")
+	mtlsIngress.Namespace = "default"
+	mtlsIngress.Annotations["yggdrasil.uswitch.com/auth-tls-verify-client"] = "true"
+	mtlsIngress.Annotations["yggdrasil.uswitch.com/auth-tls-secret"] = "mtls-secret"
+	secret := &v1.Secret{Data: map[string][]byte{"ca.crt": []byte("ca"), "tls.crt": []byte("cert"), "tls.key": []byte("key")}}
+	secret.Namespace = "default"
+	secret.Name = "mtls-secret"
+
+	if err := validateMTLSIngresses([]*k8s.Ingress{mtlsIngress}, []*v1.Secret{secret}, false); err == nil {
+		t.Fatal("expected mTLS without secret synchronization to fail")
+	}
+	if err := validateMTLSIngresses([]*k8s.Ingress{mtlsIngress}, nil, true); err == nil {
+		t.Fatal("expected mTLS without its secret to fail")
+	}
+
+	publicIngress := newGenericIngress("mtls.example.com", "other-backend")
+	if err := validateMTLSIngresses([]*k8s.Ingress{mtlsIngress, publicIngress}, []*v1.Secret{secret}, true); err == nil {
+		t.Fatal("expected conflicting mTLS policies for one host to fail")
+	}
+}
+
+func TestStaticTLSRequiresClientCertificate(t *testing.T) {
+	configurator := NewKubernetesConfigurator("a", []Certificate{{Hosts: []string{"*"}, Cert: "cert", Key: "key"}}, "", nil, "/var/log/envoy/", func(c *KubernetesConfigurator) {
+		c.envoyListenerIpv4Address = []string{"1.1.1.1"}
+	})
+
+	resources, err := configurator.generateTLSFilterChains(&envoyConfiguration{VirtualHosts: []*virtualHost{
+		{Host: "mtls.example.com", UpstreamCluster: "mtls", Timeout: time.Second, PerTryTimeout: time.Second, TrustedCa: "client-ca"},
+		{Host: "public.example.com", UpstreamCluster: "public", Timeout: time.Second, PerTryTimeout: time.Second},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resources) != 2 {
+		t.Fatalf("expected two filter chains, got %d", len(resources))
+	}
+
+	foundMTLS := false
+	foundDefault := false
+	for _, filterChain := range resources {
+		if len(filterChain.FilterChainMatch.ServerNames) == 1 && filterChain.FilterChainMatch.ServerNames[0] == "mtls.example.com" {
+			config, err := filterChain.TransportSocket.GetTypedConfig().UnmarshalNew()
+			if err != nil {
+				t.Fatal(err)
+			}
+			tls, ok := config.(*auth.DownstreamTlsContext)
+			if !ok || !tls.GetRequireClientCertificate().GetValue() || tls.GetCommonTlsContext().GetValidationContext().GetTrustedCa().GetInlineString() != "client-ca" {
+				t.Fatal("mTLS filter chain must require a client certificate")
+			}
+			assertNumberOfVirtualHosts(t, filterChain, 1)
+			foundMTLS = true
+			continue
+		}
+		if len(filterChain.FilterChainMatch.ServerNames) == 0 {
+			assertNumberOfVirtualHosts(t, filterChain, 1)
+			foundDefault = true
+			continue
+		}
+		t.Fatalf("unexpected filter chain match: %v", filterChain.FilterChainMatch.ServerNames)
+	}
+	if !foundMTLS || !foundDefault {
+		t.Fatal("mTLS and default filter chains must both be present")
+	}
+}
+
 func TestDynamicTLSFallbackRetainsMTLS(t *testing.T) {
 	configurator := NewKubernetesConfigurator("a", []Certificate{{Hosts: []string{"*"}, Cert: "cert", Key: "key"}}, "", nil, "/var/log/envoy/", WithSyncSecrets(true), func(c *KubernetesConfigurator) {
 		c.envoyListenerIpv4Address = []string{"1.1.1.1"}
@@ -176,6 +242,9 @@ func TestDynamicTLSFallbackRetainsMTLS(t *testing.T) {
 	}}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("expected one mTLS filter chain, got %d", len(resources))
 	}
 
 	for _, filterChain := range resources {

@@ -648,14 +648,6 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 			if ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"] != "" {
 				// TODO validate, add error path
 				envoyIngress.setUpstreamHttpVersion(ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"])
-				// maybe this ?
-				// val := ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"]
-				// if val != "HTTP/1.1" && val != "HTTP/2" && val != "HTTP/3" {
-				// 	logrus.Warnf("upstream-http-version should be HTTP/1.1, HTTP/2 or HTTP/3, got `%s`, setting by default HTTP/1.1", val)
-				// 	envoyIngress.setUpstreamHttpVersion("HTTP/1.1")
-				// } else {
-				// 	envoyIngress.setUpstreamHttpVersion(val)
-				// }
 			}
 			if ingress.Annotations["yggdrasil.uswitch.com/auth-tls-verify-client"] != "" {
 				val := ingress.Annotations["yggdrasil.uswitch.com/auth-tls-verify-client"]

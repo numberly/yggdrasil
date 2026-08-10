@@ -86,6 +86,7 @@ type virtualHost struct {
 	PerTryTimeout   time.Duration
 	TlsKey          string
 	TlsCert         string
+	TrustedCa       string // CA certificate for mTLS downstream
 	RetryOn         string
 
 	StickySession           bool
@@ -105,6 +106,7 @@ func (v *virtualHost) Equals(other *virtualHost) bool {
 		v.PerTryTimeout == other.PerTryTimeout &&
 		v.TlsKey == other.TlsKey &&
 		v.TlsCert == other.TlsCert &&
+		v.TrustedCa == other.TrustedCa &&
 		v.RetryOn == other.RetryOn &&
 		v.StickySession == other.StickySession &&
 		v.StickySessionCookieName == other.StickySessionCookieName &&
@@ -125,6 +127,11 @@ type cluster struct {
 	HttpVersion                  string
 	Timeout                      time.Duration
 	Hosts                        []LBHost
+	authTLSSecret                string // the secret name of the CA : could be "ca-secret"
+	authTLSVerifyClient          string // Verify or not the client cert (can be either true or false)
+	authTLSTrustedCa             string // CA used by Envoy to verify the upstream
+	authTLSEnvoyClientCert       string // the envoy cert, if authTLSSecret is set, this will be used for mTLS between envoy and the backend
+	authTLSEnvoyClientKey        string // the envoy key, if authTLSSecret is set, this will be used for mTLS between envoy and the backend
 	StickySessionChangeOnFailure *bool // nil = not set (sticky sessions disabled), false = persist to unhealthy backend
 	IdleTimeout                  *time.Duration
 	MaxConnectionDuration        *time.Duration
@@ -187,6 +194,17 @@ func (c *cluster) Equals(other *cluster) bool {
 	}
 
 	if c.HealthCheckPath != other.HealthCheckPath {
+		return false
+	}
+
+	if c.authTLSSecret != other.authTLSSecret {
+		return false
+	}
+
+	if c.authTLSVerifyClient != other.authTLSVerifyClient ||
+		c.authTLSTrustedCa != other.authTLSTrustedCa ||
+		c.authTLSEnvoyClientCert != other.authTLSEnvoyClientCert ||
+		c.authTLSEnvoyClientKey != other.authTLSEnvoyClientKey {
 		return false
 	}
 
@@ -286,12 +304,14 @@ func newEnvoyIngress(host string, timeouts DefaultTimeouts) *envoyIngress {
 			PerTryTimeout:   timeouts.PerTry,
 		},
 		cluster: &cluster{
-			Name:            clusterName,
-			VirtualHost:     host,
-			Hosts:           []LBHost{},
-			Timeout:         timeouts.Cluster,
-			HealthCheckPath: "",
-			HealthCheckHost: host,
+			Name:                clusterName,
+			VirtualHost:         host,
+			Hosts:               []LBHost{},
+			Timeout:             timeouts.Cluster,
+			HealthCheckPath:     "",
+			HealthCheckHost:     host,
+			authTLSSecret:       "",
+			authTLSVerifyClient: "false",
 		},
 	}
 }
@@ -351,6 +371,26 @@ func (ing *envoyIngress) setUpstreamHttpVersion(version string) {
 	ing.cluster.HttpVersion = version
 }
 
+func (ing *envoyIngress) setAuthTlsSecret(version string) {
+	ing.cluster.authTLSSecret = version
+}
+
+func (ing *envoyIngress) setAuthTlsVerifyClient(verify string) {
+	ing.cluster.authTLSVerifyClient = verify
+}
+
+func (ing *envoyIngress) setAuthTlsTrustedCa(ca string) {
+	ing.cluster.authTLSTrustedCa = ca
+}
+
+func (ing *envoyIngress) setAuthTlsEnvoyClientCert(cert string) {
+	ing.cluster.authTLSEnvoyClientCert = cert
+}
+
+func (ing *envoyIngress) setAuthTlsEnvoyClientKey(key string) {
+	ing.cluster.authTLSEnvoyClientKey = key
+}
+
 // hostMatch returns true if tlsHost and ruleHost match, with wildcard support
 //
 // *.a.b ruleHost accepts tlsHost *.a.b but not a.a.b or a.b or a.a.a.b
@@ -381,6 +421,21 @@ func getHostTlsSecret(ingress *k8s.Ingress, host string, secrets []*v1.Secret) (
 		}
 	}
 	return nil, fmt.Errorf("ingress %s/%s - %s has no tls secret configured", ingress.Namespace, ingress.Name, host)
+}
+
+// getCaTlsSecret returns the CA tls secret configured for a given ingress
+func getCaTlsSecret(ingress *k8s.Ingress, secrets []*v1.Secret) (*v1.Secret, error) {
+	caSecretName := ingress.Annotations["yggdrasil.uswitch.com/auth-tls-secret"]
+	if caSecretName == "" {
+		return nil, fmt.Errorf("auth-tls-secret not configured for ingress %s/%s", ingress.Namespace, ingress.Name)
+	}
+
+	for _, secret := range secrets {
+		if secret.Namespace == ingress.Namespace && secret.Name == caSecretName {
+			return secret, nil
+		}
+	}
+	return nil, fmt.Errorf("auth-tls-secret %s/%s not found", ingress.Namespace, caSecretName)
 }
 
 // validateTlsSecret checks that the given secret holds valid tls certificate and key
@@ -593,6 +648,36 @@ func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v
 			if ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"] != "" {
 				// TODO validate, add error path
 				envoyIngress.setUpstreamHttpVersion(ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"])
+			}
+			if ingress.Annotations["yggdrasil.uswitch.com/auth-tls-verify-client"] != "" {
+				val := ingress.Annotations["yggdrasil.uswitch.com/auth-tls-verify-client"]
+				switch val {
+				case "false":
+					// mTLS is disabled by default.
+				case "true":
+					caSecret, err := getCaTlsSecret(ingress, secrets)
+					if err != nil {
+						logrus.Warnf("failed to retrieve auth-tls-secret for %s/%s: %s", ingress.Namespace, ingress.Name, err)
+						break
+					}
+
+					caCert := string(caSecret.Data["ca.crt"])
+					envoyClientCert := string(caSecret.Data["tls.crt"])
+					envoyClientKey := string(caSecret.Data["tls.key"])
+					if caCert == "" || envoyClientCert == "" || envoyClientKey == "" {
+						logrus.Warnf("auth-tls-secret %s/%s must contain ca.crt, tls.crt, and tls.key", caSecret.Namespace, caSecret.Name)
+						break
+					}
+
+					envoyIngress.setAuthTlsSecret(fmt.Sprintf("%s/%s", caSecret.Namespace, caSecret.Name))
+					envoyIngress.vhost.TrustedCa = caCert
+					envoyIngress.setAuthTlsTrustedCa(caCert)
+					envoyIngress.setAuthTlsEnvoyClientCert(envoyClientCert)
+					envoyIngress.setAuthTlsEnvoyClientKey(envoyClientKey)
+					envoyIngress.setAuthTlsVerifyClient("true")
+				default:
+					logrus.Warnf("auth-tls-verify-client should be true or false, got `%s`, setting by default false", val)
+				}
 			}
 
 			if ingress.Annotations["yggdrasil.uswitch.com/idle-timeout"] != "" {

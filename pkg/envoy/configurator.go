@@ -19,9 +19,10 @@ import (
 )
 
 type Certificate struct {
-	Hosts []string `json:"hosts"`
-	Cert  string   `json:"cert"`
-	Key   string   `json:"key"`
+	Hosts     []string `json:"hosts"`
+	Cert      string   `json:"cert"`
+	Key       string   `json:"key"`
+	TrustedCa string   `json:"TrustedCa,omitempty"` // ommited if empty, used for mTLS downstream
 }
 
 type UpstreamHealthCheck struct {
@@ -225,13 +226,26 @@ func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyCon
 				logrus.Warnf("skipping vhost because of no certificate: %s", virtualHost.Host)
 			} else {
 				logrus.Infof("using default certificate for %s", virtualHost.Host)
+				if virtualHost.TrustedCa != "" {
+					filterChain, err := c.makeFilterChain(Certificate{
+						Hosts:     []string{virtualHost.Host},
+						Cert:      c.certificates[0].Cert,
+						Key:       c.certificates[0].Key,
+						TrustedCa: virtualHost.TrustedCa,
+					}, []*route.VirtualHost{envoyVhost}, config.AccessLog)
+					if err != nil {
+						return nil, err
+					}
+					filterChains = append(filterChains, &filterChain)
+				}
 			}
 			continue
 		}
 		certificate := Certificate{
-			Hosts: []string{virtualHost.Host},
-			Cert:  virtualHost.TlsCert,
-			Key:   virtualHost.TlsKey,
+			Hosts:     []string{virtualHost.Host},
+			Cert:      virtualHost.TlsCert,
+			Key:       virtualHost.TlsKey,
+			TrustedCa: virtualHost.TrustedCa,
 		}
 		filterChain, err := c.makeFilterChain(certificate, []*route.VirtualHost{envoyVhost}, config.AccessLog)
 		if err != nil {

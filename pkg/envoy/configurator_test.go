@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	v3cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcache "github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -234,5 +235,38 @@ func TestGenerateListeners(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGenerateDnsRefreshRate(t *testing.T) {
+	ingresses := []*k8s.Ingress{
+		newGenericIngress("foo.internal.api.com", "bibble"),
+	}
+
+	dnsRefreshRate := 5 * time.Second
+	configurator := NewKubernetesConfigurator("a", []Certificate{
+		{Hosts: []string{"*"}, Cert: "b", Key: "c"},
+	}, "d", []string{"bar"}, []string{"192.168.0.0/16"}, WithDnsRefreshRate(dnsRefreshRate))
+
+	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
+	if err != nil {
+		t.Fatalf("Error generating snapshot %v", err)
+	}
+
+	clusters := snapshot.Resources[tcache.Cluster].Items
+	if len(clusters) != 1 {
+		t.Fatalf("Num clusters: %d expected %d", len(clusters), 1)
+	}
+
+	var got *v3cluster.Cluster
+	for _, r := range clusters {
+		got = r.Resource.(*v3cluster.Cluster)
+	}
+
+	if got.DnsRefreshRate == nil {
+		t.Fatal("expected DnsRefreshRate to be set, got nil")
+	}
+	if got.DnsRefreshRate.AsDuration() != dnsRefreshRate {
+		t.Fatalf("DnsRefreshRate: %v expected %v", got.DnsRefreshRate.AsDuration(), dnsRefreshRate)
 	}
 }

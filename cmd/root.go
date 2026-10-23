@@ -91,6 +91,7 @@ func init() {
 	rootCmd.PersistentFlags().Uint32("envoy-port", 10000, "port by the envoy proxy to accept incoming connections")
 	rootCmd.PersistentFlags().Int32("max-ejection-percentage", -1, "maximal percentage of hosts ejected via outlier detection. Set to >=0 to activate outlier detection in envoy.")
 	rootCmd.PersistentFlags().Int64("host-selection-retry-attempts", -1, "Number of host selection retry attempts. Set to value >=0 to enable")
+	rootCmd.PersistentFlags().Duration("dns-refresh-rate", 5*time.Second, "Interval at which Envoy re-resolves DNS for STRICT_DNS clusters (dns_refresh_rate). Must be at least 1ms.")
 	rootCmd.PersistentFlags().String("retry-on", "5xx", "default comma-separated list of retry policies")
 	rootCmd.PersistentFlags().String("tracing-provider", "", "HTTP Connection Manager tracing provider block to include")
 	rootCmd.PersistentFlags().Duration("upstream-healthcheck-interval", 10*time.Second, "duration of the upstream health check interval")
@@ -125,6 +126,7 @@ func init() {
 	viper.BindPFlag("envoyPort", rootCmd.PersistentFlags().Lookup("envoy-port"))
 	viper.BindPFlag("maxEjectionPercentage", rootCmd.PersistentFlags().Lookup("max-ejection-percentage"))
 	viper.BindPFlag("hostSelectionRetryAttempts", rootCmd.PersistentFlags().Lookup("host-selection-retry-attempts"))
+	viper.BindPFlag("dnsRefreshRate", rootCmd.PersistentFlags().Lookup("dns-refresh-rate"))
 	viper.BindPFlag("retryOn", rootCmd.PersistentFlags().Lookup("retry-on"))
 	viper.BindPFlag("tracingProvider", rootCmd.PersistentFlags().Lookup("tracing-provider"))
 	viper.BindPFlag("upstreamHealthCheck.interval", rootCmd.PersistentFlags().Lookup("upstream-healthcheck-interval"))
@@ -167,6 +169,10 @@ func main(*cobra.Command, []string) error {
 
 	if !envoy.ValidateEnvoyRetryOn(viper.GetString("retryOn")) {
 		return fmt.Errorf("invalid retry-on parameter: %s", viper.GetString("retryOn"))
+	}
+
+	if d := viper.GetDuration("dnsRefreshRate"); d < time.Millisecond {
+		return fmt.Errorf("invalid dns-refresh-rate %v: must be at least 1ms", d)
 	}
 
 	if viper.Get("debug") == true {
@@ -239,6 +245,7 @@ func main(*cobra.Command, []string) error {
 		envoy.WithEnvoyPort(uint32(viper.GetInt32("envoyPort"))),
 		envoy.WithOutlierPercentage(viper.GetInt32("maxEjectionPercentage")),
 		envoy.WithHostSelectionRetryAttempts(viper.GetInt64("hostSelectionRetryAttempts")),
+		envoy.WithDnsRefreshRate(viper.GetDuration("dnsRefreshRate")),
 		envoy.WithUpstreamHealthCheck(c.UpstreamHealthCheck),
 		envoy.WithUseRemoteAddress(c.UseRemoteAddress),
 		envoy.WithHttpExtAuthzCluster(c.HttpExtAuthz),

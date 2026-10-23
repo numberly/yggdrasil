@@ -5,6 +5,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	cal "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	v3cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -460,7 +461,7 @@ func makeHealthChecks(upstreamVHost string, healthPath string, config UpstreamHe
 	return healthChecks
 }
 
-func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPercentage int32, addresses []*core.Address) *v3cluster.Cluster {
+func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPercentage int32, addresses []*core.Address, dnsRefreshRate time.Duration) *v3cluster.Cluster {
 
 	tls := &auth.UpstreamTlsContext{}
 	if ca != "" {
@@ -502,6 +503,7 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 		ClusterDiscoveryType: &v3cluster.Cluster_Type{Type: v3cluster.Cluster_STRICT_DNS},
 		Name:                 c.Name,
 		ConnectTimeout:       durationpb.New(c.Timeout),
+		DnsRefreshRate:       durationpb.New(dnsRefreshRate),
 		LoadAssignment: &endpoint.ClusterLoadAssignment{
 			ClusterName: c.Name,
 			Endpoints: []*endpoint.LocalityLbEndpoints{

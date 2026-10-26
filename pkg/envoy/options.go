@@ -1,5 +1,7 @@
 package envoy
 
+import "time"
+
 type option func(c *KubernetesConfigurator)
 
 // WithEnvoyListenerIpv4Address configures envoy IPv4 listen address into a KubernetesConfigurator
@@ -27,6 +29,13 @@ func WithUpstreamPort(port uint32) option {
 func WithOutlierPercentage(percentage int32) option {
 	return func(c *KubernetesConfigurator) {
 		c.outlierPercentage = percentage
+	}
+}
+
+// WithDnsRefreshRate configures the interval at which Envoy re-resolves DNS for STRICT_DNS clusters
+func WithDnsRefreshRate(dnsRefreshRate time.Duration) option {
+	return func(c *KubernetesConfigurator) {
+		c.dnsRefreshRate = dnsRefreshRate
 	}
 }
 

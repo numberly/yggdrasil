@@ -114,7 +114,7 @@ func TestMakeClusterUsesIngressMTLSCA(t *testing.T) {
 		authTLSTrustedCa:       "ingress-ca",
 		authTLSEnvoyClientCert: "client-cert",
 		authTLSEnvoyClientKey:  "client-key",
-	}, "", UpstreamHealthCheck{}, 0, makeAddresses([]LBHost{{Host: "backend", Weight: 1}}, 443))
+	}, "", UpstreamHealthCheck{}, 0, makeAddresses([]LBHost{{Host: "backend", Weight: 1}}, 443), time.Second)
 
 	config, err := cluster.TransportSocket.GetTypedConfig().UnmarshalNew()
 	if err != nil {
@@ -209,7 +209,7 @@ func TestMakeClusterWithStickySessionOverrideHost(t *testing.T) {
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
 	}
-	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses, time.Second)
 
 	if result.CommonLbConfig == nil {
 		t.Fatal("expected CommonLbConfig to be set")
@@ -240,7 +240,7 @@ func TestMakeClusterWithoutStickySessionOverrideHost(t *testing.T) {
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
 	}
-	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses, time.Second)
 
 	if result.CommonLbConfig != nil {
 		t.Error("expected CommonLbConfig to be nil when StickySessionChangeOnFailure is true")
@@ -257,7 +257,7 @@ func TestMakeClusterWithStickySessionNil(t *testing.T) {
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
 	}
-	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses, time.Second)
 
 	if result.CommonLbConfig != nil {
 		t.Error("expected CommonLbConfig to be nil when StickySessionChangeOnFailure is nil (sticky sessions disabled)")
@@ -292,7 +292,7 @@ func TestMakeClusterDefaultHttpProtocolOptions(t *testing.T) {
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
 	}
-	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses, time.Second)
 
 	anyOpts := result.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
 	if anyOpts == nil {
@@ -337,7 +337,7 @@ func TestMakeClusterCustomHttpProtocolOptions(t *testing.T) {
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
 	}
-	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses, time.Second)
 
 	anyOpts := result.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
 	opts := &envoy_extension_http.HttpProtocolOptions{}

@@ -72,6 +72,7 @@ type KubernetesConfigurator struct {
 	envoyListenerIpv4Address   []string
 	outlierPercentage          int32
 	hostSelectionRetryAttempts int64
+	dnsRefreshRate             time.Duration
 	upstreamHealthCheck        UpstreamHealthCheck
 	useRemoteAddress           bool
 	httpExtAuthz               HttpExtAuthz
@@ -341,7 +342,7 @@ func (c *KubernetesConfigurator) generateClusters(config *envoyConfiguration) []
 
 	for _, cluster := range config.Clusters {
 		addresses := makeAddresses(cluster.Hosts, c.upstreamPort)
-		cluster := makeCluster(*cluster, c.trustCA, c.upstreamHealthCheck, c.outlierPercentage, addresses)
+		cluster := makeCluster(*cluster, c.trustCA, c.upstreamHealthCheck, c.outlierPercentage, addresses, c.dnsRefreshRate)
 		clusters = append(clusters, cluster)
 	}
 

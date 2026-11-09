@@ -114,7 +114,7 @@ func TestMakeClusterUsesIngressMTLSCA(t *testing.T) {
 		authTLSTrustedCa:       "ingress-ca",
 		authTLSEnvoyClientCert: "client-cert",
 		authTLSEnvoyClientKey:  "client-key",
-	}, "", UpstreamHealthCheck{}, 0, makeAddresses([]LBHost{{Host: "backend", Weight: 1}}, 443))
+	}, "", UpstreamHealthCheck{}, 0, makeAddresses([]LBHost{{Host: "backend", Weight: 1}}, 443), time.Second)
 
 	config, err := cluster.TransportSocket.GetTypedConfig().UnmarshalNew()
 	if err != nil {
@@ -209,7 +209,7 @@ func TestMakeClusterWithStickySessionOverrideHost(t *testing.T) {
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
 	}
-	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses, time.Second)
 
 	if result.CommonLbConfig == nil {
 		t.Fatal("expected CommonLbConfig to be set")
@@ -240,7 +240,7 @@ func TestMakeClusterWithoutStickySessionOverrideHost(t *testing.T) {
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
 	}
-	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses, time.Second)
 
 	if result.CommonLbConfig != nil {
 		t.Error("expected CommonLbConfig to be nil when StickySessionChangeOnFailure is true")
@@ -257,7 +257,7 @@ func TestMakeClusterWithStickySessionNil(t *testing.T) {
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
 	}
-	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses, time.Second)
 
 	if result.CommonLbConfig != nil {
 		t.Error("expected CommonLbConfig to be nil when StickySessionChangeOnFailure is nil (sticky sessions disabled)")
@@ -292,7 +292,7 @@ func TestMakeClusterDefaultHttpProtocolOptions(t *testing.T) {
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
 	}
-	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses, time.Second)
 
 	anyOpts := result.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
 	if anyOpts == nil {
@@ -337,7 +337,7 @@ func TestMakeClusterCustomHttpProtocolOptions(t *testing.T) {
 	addresses := []*core.Address{
 		{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{Address: "host1", PortSpecifier: &core.SocketAddress_PortValue{PortValue: 443}}}},
 	}
-	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses)
+	result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses, time.Second)
 
 	anyOpts := result.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
 	opts := &envoy_extension_http.HttpProtocolOptions{}
@@ -376,5 +376,42 @@ func TestClusterEqualsWithHttpProtocolOptions(t *testing.T) {
 	}
 	if c1.Equals(c4) {
 		t.Error("clusters with different fields set should not be equal")
+	}
+}
+
+func TestMakeClusterDnsRefreshRate(t *testing.T) {
+	c := cluster{
+		Name:        "test_cluster",
+		VirtualHost: "test.example.com",
+		Timeout:     5 * time.Second,
+		Hosts:       []LBHost{{"host1", 1}},
+	}
+	addresses := makeAddresses(c.Hosts, 443)
+
+	tests := []struct {
+		name    string
+		rate    time.Duration
+		wantSet bool
+		wantErr bool
+	}{
+		{name: "zero leaves envoy default", rate: 0, wantSet: false},
+		{name: "1ms is rejected by envoy", rate: time.Millisecond, wantSet: true, wantErr: true},
+		{name: "above 1ms is valid", rate: 2 * time.Millisecond, wantSet: true},
+		{name: "default flag value", rate: 5 * time.Second, wantSet: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := makeCluster(c, "", UpstreamHealthCheck{}, -1, addresses, tc.rate)
+
+			if got := result.DnsRefreshRate != nil; got != tc.wantSet {
+				t.Fatalf("DnsRefreshRate set: %v expected %v", got, tc.wantSet)
+			}
+			if tc.wantSet && result.DnsRefreshRate.AsDuration() != tc.rate {
+				t.Errorf("DnsRefreshRate: %v expected %v", result.DnsRefreshRate.AsDuration(), tc.rate)
+			}
+			if err := result.Validate(); (err != nil) != tc.wantErr {
+				t.Errorf("Validate() error: %v, wantErr %v", err, tc.wantErr)
+			}
+		})
 	}
 }

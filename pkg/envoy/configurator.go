@@ -72,6 +72,7 @@ type KubernetesConfigurator struct {
 	envoyListenerIpv4Address   []string
 	outlierPercentage          int32
 	hostSelectionRetryAttempts int64
+	dnsRefreshRate             time.Duration
 	upstreamHealthCheck        UpstreamHealthCheck
 	useRemoteAddress           bool
 	httpExtAuthz               HttpExtAuthz
@@ -93,6 +94,9 @@ func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca str
 	c := &KubernetesConfigurator{ingressClasses: ingressClasses, nodeID: nodeID, certificates: certificates, trustCA: ca, accessLog: accessLog}
 	for _, opt := range options {
 		opt(c)
+	}
+	if c.dnsRefreshRate <= 0 {
+		logrus.Warnf("dnsRefreshRate not configured (%v), clusters will use Envoy's default dns_refresh_rate", c.dnsRefreshRate)
 	}
 	return c
 }
@@ -341,7 +345,7 @@ func (c *KubernetesConfigurator) generateClusters(config *envoyConfiguration) []
 
 	for _, cluster := range config.Clusters {
 		addresses := makeAddresses(cluster.Hosts, c.upstreamPort)
-		cluster := makeCluster(*cluster, c.trustCA, c.upstreamHealthCheck, c.outlierPercentage, addresses)
+		cluster := makeCluster(*cluster, c.trustCA, c.upstreamHealthCheck, c.outlierPercentage, addresses, c.dnsRefreshRate)
 		clusters = append(clusters, cluster)
 	}
 

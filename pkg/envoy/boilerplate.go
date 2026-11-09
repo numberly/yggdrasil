@@ -632,7 +632,6 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 		ClusterDiscoveryType: &v3cluster.Cluster_Type{Type: v3cluster.Cluster_STRICT_DNS},
 		Name:                 c.Name,
 		ConnectTimeout:       durationpb.New(c.Timeout),
-		DnsRefreshRate:       durationpb.New(dnsRefreshRate),
 		LoadAssignment: &endpoint.ClusterLoadAssignment{
 			ClusterName: c.Name,
 			Endpoints: []*endpoint.LocalityLbEndpoints{
@@ -653,6 +652,10 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 				},
 			},
 		},
+	}
+	// Leave unset when zero so Envoy falls back to its default (5s) instead of rejecting the cluster
+	if dnsRefreshRate > 0 {
+		cluster.DnsRefreshRate = durationpb.New(dnsRefreshRate)
 	}
 	if c.StickySessionChangeOnFailure != nil && !*c.StickySessionChangeOnFailure {
 		cluster.CommonLbConfig = &v3cluster.Cluster_CommonLbConfig{

@@ -95,7 +95,7 @@ func init() {
 	rootCmd.PersistentFlags().Uint32("envoy-port", 10000, "port by the envoy proxy to accept incoming connections")
 	rootCmd.PersistentFlags().Int32("max-ejection-percentage", -1, "maximal percentage of hosts ejected via outlier detection. Set to >=0 to activate outlier detection in envoy.")
 	rootCmd.PersistentFlags().Int64("host-selection-retry-attempts", -1, "Number of host selection retry attempts. Set to value >=0 to enable")
-	rootCmd.PersistentFlags().Duration("dns-refresh-rate", 5*time.Second, "Interval at which Envoy re-resolves DNS for STRICT_DNS clusters (dns_refresh_rate). Must be at least 1ms.")
+	rootCmd.PersistentFlags().Duration("dns-refresh-rate", 5*time.Second, "Interval at which Envoy re-resolves DNS for STRICT_DNS clusters (dns_refresh_rate). Must be greater than 1ms.")
 	rootCmd.PersistentFlags().String("retry-on", "5xx", "default comma-separated list of retry policies")
 	rootCmd.PersistentFlags().String("tracing-provider", "", "HTTP Connection Manager tracing provider block to include")
 	rootCmd.PersistentFlags().Duration("upstream-healthcheck-interval", 10*time.Second, "duration of the upstream health check interval")
@@ -183,8 +183,8 @@ func main(*cobra.Command, []string) error {
 		return fmt.Errorf("invalid retry-on parameter: %s", viper.GetString("retryOn"))
 	}
 
-	if d := viper.GetDuration("dnsRefreshRate"); d < time.Millisecond {
-		return fmt.Errorf("invalid dns-refresh-rate %v: must be at least 1ms", d)
+	if d := viper.GetDuration("dnsRefreshRate"); d <= time.Millisecond {
+		return fmt.Errorf("invalid dns-refresh-rate %v: must be greater than 1ms", d)
 	}
 
 	if viper.Get("debug") == true {

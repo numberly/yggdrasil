@@ -1,6 +1,7 @@
 package envoy
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -263,6 +264,7 @@ func TestGenerateListeners(t *testing.T) {
 				if listener.FilterChains[0].FilterChainMatch == nil {
 					t.Fatalf("Expected filter chain")
 				}
+				assertNoSha1SignatureAlgorithms(t, listener.FilterChains[0])
 			}
 		})
 	}
@@ -298,5 +300,22 @@ func TestGenerateDnsRefreshRate(t *testing.T) {
 	}
 	if got.DnsRefreshRate.AsDuration() != dnsRefreshRate {
 		t.Fatalf("DnsRefreshRate: %v expected %v", got.DnsRefreshRate.AsDuration(), dnsRefreshRate)
+	}
+}
+
+func assertNoSha1SignatureAlgorithms(t *testing.T, fc *listener.FilterChain) {
+	t.Helper()
+	tls := &auth.DownstreamTlsContext{}
+	if err := fc.TransportSocket.GetTypedConfig().UnmarshalTo(tls); err != nil {
+		t.Fatalf("failed to unmarshal DownstreamTlsContext: %v", err)
+	}
+	algs := tls.CommonTlsContext.TlsParams.GetSignatureAlgorithms()
+	if len(algs) == 0 {
+		t.Fatalf("expected explicit signature_algorithms, got none (BoringSSL default includes SHA-1)")
+	}
+	for _, a := range algs {
+		if strings.HasSuffix(a, "sha1") {
+			t.Fatalf("SHA-1 signature algorithm must not be advertised: %s", a)
+		}
 	}
 }

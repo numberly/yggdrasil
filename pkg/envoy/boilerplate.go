@@ -354,6 +354,20 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 	}, nil
 }
 
+// tlsSignatureAlgorithms is the ordered list of signature algorithms Envoy may use
+// on downstream TLS 1.2 handshakes. SHA-1 variants are deliberately excluded.
+var tlsSignatureAlgorithms = []string{
+	"ecdsa_secp256r1_sha256",
+	"ecdsa_secp384r1_sha384",
+	"ecdsa_secp521r1_sha512",
+	"rsa_pss_rsae_sha256",
+	"rsa_pss_rsae_sha384",
+	"rsa_pss_rsae_sha512",
+	"rsa_pkcs1_sha256",
+	"rsa_pkcs1_sha384",
+	"rsa_pkcs1_sha512",
+}
+
 func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtualHosts []*route.VirtualHost, accessLog string) (listener.FilterChain, error) {
 	httpConnectionManager, err := c.makeConnectionManager(virtualHosts, accessLog)
 	if err != nil {
@@ -379,6 +393,9 @@ func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtua
 		},
 		TlsParams: &auth.TlsParameters{
 			TlsMinimumProtocolVersion: auth.TlsParameters_TLSv1_2,
+			// BoringSSL defaults advertise SHA-1 signature algorithms (rsa_pkcs1_sha1, ecdsa_sha1)
+			// for TLS 1.2; restrict to SHA-2 so clients offering only SHA-1 are refused.
+			SignatureAlgorithms: tlsSignatureAlgorithms,
 		},
 	}
 	// If the certificate has a trusted CA, we set it in the TLS context (mTLS downstream)

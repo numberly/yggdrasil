@@ -95,6 +95,9 @@ func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca str
 	for _, opt := range options {
 		opt(c)
 	}
+	if c.dnsRefreshRate <= 0 {
+		logrus.Warnf("dnsRefreshRate not configured (%v), clusters will use Envoy's default dns_refresh_rate", c.dnsRefreshRate)
+	}
 	return c
 }
 

@@ -653,7 +653,8 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 			},
 		},
 	}
-	// Leave unset when zero so Envoy falls back to its default (5s) instead of rejecting the cluster
+	// The flag is validated in cmd/root.go; this guard only protects callers that skip WithDnsRefreshRate
+	// (a warning is logged by NewKubernetesConfigurator) so Envoy uses its 5s default instead of NACKing CDS
 	if dnsRefreshRate > 0 {
 		cluster.DnsRefreshRate = durationpb.New(dnsRefreshRate)
 	}

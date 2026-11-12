@@ -3,5 +3,6 @@ command
 testing
 ca/
 config/
-envoy/
+/envoy/
 
+launch.json

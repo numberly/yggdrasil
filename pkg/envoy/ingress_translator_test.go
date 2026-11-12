@@ -53,6 +53,28 @@ HMDnomVYrn/CmceQFWDWQ/dLG3OgiffsjhxOS0IaaDKgUxJH7/eW5AesWmhg1z9x
 0JSjab6mTneQMtHukPZEaLmwPlksEA1k2A/wph9mEjyZpgS4IogLORA=
 -----END PRIVATE KEY-----`
 
+	// dummy p-521 cert
+	p521crt = `-----BEGIN CERTIFICATE-----
+MIIB/TCCAV6gAwIBAgIUalLHxUR4R/cATXoia/hwou1UYY0wCgYIKoZIzj0EAwIw
+EDEOMAwGA1UEAwwFZHVtbXkwHhcNMjUwNjE3MDgyNzU5WhcNMjYwNjE3MDgyNzU5
+WjAQMQ4wDAYDVQQDDAVkdW1teTCBmzAQBgcqhkjOPQIBBgUrgQQAIwOBhgAEAKIU
+tBnFN/IIlNPkg/qiWSq8OtOJA76BrltrjGm7RkXCh7AGEi4JhBo7kElp/oqE8D6W
+Lze2+NHoczEZ6P2vOXbPAHIj9J+ti1fFm9prRTeV0Hn+YOqWBirnzu+2X3Vi2gSF
+q2tmIIMyWQBqt+T4zGo1qBTpfX1cIBG7baMMjK4xC7QJo1MwUTAdBgNVHQ4EFgQU
+aZAE5vnNQV2ztM/47huVttmWHjYwHwYDVR0jBBgwFoAUaZAE5vnNQV2ztM/47huV
+ttmWHjYwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgOBjAAwgYgCQgDtOZt1
+OrmrEMbnB48DR52iFw1OR1ppXdCno4Owk2Amu/N3tuIsKctxtSrxQhejh4L+BNHh
+y1mXVMilq41U+gbhZAJCAUKFcuGqUdMFUhCmKHC78YIN8PCeZ56mE2hqSwprBJGS
+pzAmjBamDqkRJP4UdTjER1KyQfZJ1126r/TxA9+Tnn1j
+-----END CERTIFICATE-----`
+	p521key = `-----BEGIN EC PRIVATE KEY-----
+MIHcAgEBBEIAmn+TNqs72qAK6BfgaeNDlE+lr/+vP54s+zQAv4dWwJoGLoouzNSr
+Tim9rC01Ut1+5b9M4W5Ridx+E6aOU8G46fCgBwYFK4EEACOhgYkDgYYABACiFLQZ
+xTfyCJTT5IP6olkqvDrTiQO+ga5ba4xpu0ZFwoewBhIuCYQaO5BJaf6KhPA+li83
+tvjR6HMxGej9rzl2zwByI/SfrYtXxZvaa0U3ldB5/mDqlgYq587vtl91YtoEhatr
+ZiCDMlkAarfk+MxqNagU6X19XCARu22jDIyuMQu0CQ==
+-----END EC PRIVATE KEY-----`
+
 	// dummy rsa2048 cert
 	rsa2048crt = `-----BEGIN CERTIFICATE-----
 MIIDETCCAfkCFArEpbFYH4WmMV2id+QeAriE3c+CMA0GCSqGSIb3DQEBCwUAMEUx
@@ -127,6 +149,22 @@ func TestVirtualHostEquality(t *testing.T) {
 	e := &virtualHost{Host: "foo", PerTryTimeout: (5 * time.Second)}
 	if a.Equals(e) {
 		t.Error("virtual hosts with different per try timeout values should not be equal")
+	}
+
+	f := &virtualHost{Host: "foo", StickySession: true, StickySessionCookieName: "sess", StickySessionCookiePath: "/", StickySessionCookieTTL: 3600 * time.Second}
+	if a.Equals(f) {
+		t.Error("virtual hosts with different sticky session values should not be equal")
+	}
+
+	g := &virtualHost{Host: "foo", StickySession: true, StickySessionCookieName: "sess", StickySessionCookiePath: "/", StickySessionCookieTTL: 3600 * time.Second}
+	h := &virtualHost{Host: "foo", StickySession: true, StickySessionCookieName: "sess", StickySessionCookiePath: "/", StickySessionCookieTTL: 3600 * time.Second}
+	if !g.Equals(h) {
+		t.Error("virtual hosts with same sticky session values should be equal")
+	}
+
+	i := &virtualHost{Host: "foo", StickySession: true, StickySessionCookieName: "different", StickySessionCookiePath: "/", StickySessionCookieTTL: 3600 * time.Second}
+	if g.Equals(i) {
+		t.Error("virtual hosts with different sticky session cookie names should not be equal")
 	}
 }
 
@@ -204,8 +242,13 @@ func TestEqualityVirtualHosts(t *testing.T) {
 func TestEquals(t *testing.T) {
 	ingress := newGenericIngress("foo.app.com", "foo.cluster.com")
 	ingress2 := newGenericIngress("bar.app.com", "foo.bar.com")
-	c := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{})
-	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c.equals(c2)
 	if vmatch != true {
@@ -221,8 +264,13 @@ func TestNotEquals(t *testing.T) {
 	ingress2 := newGenericIngress("foo.app.com", "bar.cluster.com")
 	ingress3 := newGenericIngress("foo.baz.com", "bar.cluster.com")
 	ingress4 := newGenericIngress("foo.howdy.com", "bar.cluster.com")
-	c := translateIngresses([]*k8s.Ingress{ingress, ingress3, ingress2}, false, []*v1.Secret{})
-	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2, ingress4}, false, []*v1.Secret{})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress, ingress3, ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.Ingress{ingress, ingress2, ingress4}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c.equals(c2)
 	if vmatch == true {
@@ -237,8 +285,13 @@ func TestNotEquals(t *testing.T) {
 func TestPartialEquals(t *testing.T) {
 	ingress := newGenericIngress("foo.app.com", "bar.cluster.com")
 	ingress2 := newGenericIngress("foo.app.com", "foo.cluster.com")
-	c := translateIngresses([]*k8s.Ingress{ingress2}, false, []*v1.Secret{})
-	c2 := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress2}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+	c2 := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	vmatch, cmatch := c2.equals(c)
 	if vmatch != true {
@@ -252,7 +305,12 @@ func TestPartialEquals(t *testing.T) {
 
 func TestGeneratesForSingleIngress(t *testing.T) {
 	ingress := newGenericIngress("foo.app.com", "foo.cluster.com")
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Error("expected 1 virtual host")
@@ -288,7 +346,12 @@ func TestGeneratesForSingleIngress(t *testing.T) {
 func TestGeneratesForMultipleIngressSharingSpecHost(t *testing.T) {
 	fooIngress := newGenericIngress("app.com", "foo.com")
 	barIngress := newGenericIngress("app.com", "bar.com")
-	c := translateIngresses([]*k8s.Ingress{fooIngress, barIngress}, false, []*v1.Secret{})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{fooIngress, barIngress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 
 	if len(c.VirtualHosts) != 1 {
 		t.Error("expected 1 virtual host")
@@ -309,10 +372,10 @@ func TestGeneratesForMultipleIngressSharingSpecHost(t *testing.T) {
 		t.Errorf("expected 2 host, was %d", len(c.Clusters[0].Hosts))
 	}
 	if c.Clusters[0].Hosts[0].Host != "foo.com" {
-		t.Errorf("expected cluster host for foo.com, was %s", c.Clusters[0].Hosts[0].Host)
+		t.Errorf("expected cluster host for foo.com, was %v", c.Clusters[0].Hosts[0].Host)
 	}
 	if c.Clusters[0].Hosts[1].Host != "bar.com" {
-		t.Errorf("expected cluster host for bar.com, was %s", c.Clusters[0].Hosts[1].Host)
+		t.Errorf("expected cluster host for bar.com, was %v", c.Clusters[0].Hosts[1].Host)
 	}
 
 	if c.VirtualHosts[0].UpstreamCluster != c.Clusters[0].Name {
@@ -343,9 +406,14 @@ func TestFilterNonMatchingIngresses(t *testing.T) {
 
 func TestIngressWithIP(t *testing.T) {
 	ingress := newIngressIP("app.com", "127.0.0.1")
-	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
 	if c.Clusters[0].Hosts[0].Host != "127.0.0.1" {
-		t.Errorf("expected cluster host to be IP address, was %s", c.Clusters[0].Hosts[0].Host)
+		t.Errorf("expected cluster host to be IP address, was %v", c.Clusters[0].Hosts[0].Host)
 	}
 }
 
@@ -500,6 +568,18 @@ func TestValidateWrongPEMTlsSecret(t *testing.T) {
 	}
 }
 
+func TestValidateP521TlsSecret(t *testing.T) {
+	sec := &v1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "sec"}, Data: map[string][]byte{
+		"tls.crt": []byte(p521crt),
+		"tls.key": []byte(p521key),
+	}}
+	if v, err := validateTlsSecret(sec); err != nil {
+		t.Errorf("expected no error, caught: %s", err.Error())
+	} else if !v {
+		t.Errorf("expected ECDSA P-521 cert to be valid")
+	}
+}
+
 func TestValidateP384TlsSecret(t *testing.T) {
 	sec := &v1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "sec"}, Data: map[string][]byte{
 		"tls.crt": []byte(p384crt),
@@ -507,8 +587,8 @@ func TestValidateP384TlsSecret(t *testing.T) {
 	}}
 	if v, err := validateTlsSecret(sec); err != nil {
 		t.Errorf("expected no error, caught: %s", err.Error())
-	} else if v {
-		t.Errorf("expected ECDSA >256 cert to be invalid")
+	} else if !v {
+		t.Errorf("expected ECDSA P-384 cert to be valid")
 	}
 }
 
@@ -536,6 +616,111 @@ func TestValidateRsa2048TlsSecret(t *testing.T) {
 	}
 }
 
+func TestTranslateIngressesWithMTLSAnnotations(t *testing.T) {
+	ingress := newGenericIngress("example.com", "upstream-service")
+	ingress.Namespace = "default"
+	ingress.Annotations = map[string]string{
+		"yggdrasil.uswitch.com/auth-tls-secret":        "ca-secret",
+		"yggdrasil.uswitch.com/auth-tls-verify-client": "true",
+	}
+
+	secrets := []*v1.Secret{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ca-secret",
+				Namespace: "default",
+			},
+			Data: map[string][]byte{
+				"ca.crt":  []byte("dummy-ca"),
+				"tls.crt": []byte("dummy-cert"),
+				"tls.key": []byte("dummy-key"),
+			},
+		},
+	}
+
+	timeouts := DefaultTimeouts{
+		Route:   5 * time.Second,
+		PerTry:  2 * time.Second,
+		Cluster: 10 * time.Second,
+	}
+
+	cfg := translateIngresses([]*k8s.Ingress{ingress}, true, secrets, timeouts, "/var/log/envoy/access.log")
+
+	if len(cfg.Clusters) != 1 {
+		t.Fatalf("Expected 1 cluster, got %d", len(cfg.Clusters))
+	}
+	if cfg.Clusters[0].authTLSSecret != "default/ca-secret" {
+		t.Errorf("Expected authTLSSecret to be 'default/ca-secret', got '%s'", cfg.Clusters[0].authTLSSecret)
+	}
+	if cfg.Clusters[0].authTLSVerifyClient != "true" {
+		t.Errorf("Expected authTLSVerifyClient to be true")
+	}
+	if cfg.VirtualHosts[0].TrustedCa != "dummy-ca" || cfg.Clusters[0].authTLSTrustedCa != "dummy-ca" {
+		t.Errorf("Expected mTLS CA to be propagated to downstream and upstream TLS contexts")
+	}
+	if cfg.Clusters[0].authTLSEnvoyClientCert != "dummy-cert" || cfg.Clusters[0].authTLSEnvoyClientKey != "dummy-key" {
+		t.Errorf("Expected Envoy client certificate to be propagated")
+	}
+}
+
+func TestMTLSSecretRotationChangesConfiguration(t *testing.T) {
+	oldVhost := &virtualHost{Host: "example.com", TrustedCa: "old-ca"}
+	newVhost := &virtualHost{Host: "example.com", TrustedCa: "new-ca"}
+	if oldVhost.Equals(newVhost) {
+		t.Fatal("rotated mTLS CA must update the listener configuration")
+	}
+
+	oldCluster := &cluster{Name: "example_com", authTLSTrustedCa: "old-ca", authTLSEnvoyClientCert: "old-cert", authTLSEnvoyClientKey: "old-key"}
+	newCluster := &cluster{Name: "example_com", authTLSTrustedCa: "new-ca", authTLSEnvoyClientCert: "new-cert", authTLSEnvoyClientKey: "new-key"}
+	if oldCluster.Equals(newCluster) {
+		t.Fatal("rotated mTLS credentials must update the cluster configuration")
+	}
+}
+
+func TestTranslateIngressesWithInvalidMTLSAnnotations2(t *testing.T) {
+	ingress := newGenericIngress("example.com", "upstream-service")
+	ingress.Annotations = map[string]string{
+		"yggdrasil.uswitch.com/auth-tls-verify-client": "nottrue",
+	}
+
+	timeouts := DefaultTimeouts{
+		Route:   5 * time.Second,
+		PerTry:  2 * time.Second,
+		Cluster: 10 * time.Second,
+	}
+
+	cfg := translateIngresses([]*k8s.Ingress{ingress}, false, nil, timeouts, "/var/log/envoy/access.log")
+
+	if len(cfg.Clusters) != 1 {
+		t.Fatalf("Expected 1 cluster, got %d", len(cfg.Clusters))
+	}
+	if cfg.Clusters[0].authTLSVerifyClient != "false" {
+		t.Errorf("Expected authTLSVerifyClient to default to false on invalid input, got '%s'", cfg.Clusters[0].authTLSVerifyClient)
+	}
+}
+
+func TestTranslateIngressesWithNoSecretConfigured(t *testing.T) {
+	ingress := newGenericIngress("example.com", "upstream-service")
+	ingress.Annotations = map[string]string{
+		"yggdrasil.uswitch.com/auth-tls-secret": "ca-secret",
+	}
+
+	timeouts := DefaultTimeouts{
+		Route:   5 * time.Second,
+		PerTry:  2 * time.Second,
+		Cluster: 10 * time.Second,
+	}
+
+	cfg := translateIngresses([]*k8s.Ingress{ingress}, false, nil, timeouts, "/var/log/envoy/access.log")
+
+	if len(cfg.Clusters) != 1 {
+		t.Fatalf("Expected 1 cluster, got %d", len(cfg.Clusters))
+	}
+	if cfg.Clusters[0].authTLSSecret != "" {
+		t.Errorf("Expected authTLSSecret to be empty on invalid input, got '%s'", cfg.Clusters[0].authTLSSecret)
+	}
+}
+
 func newIngress(specHost string, loadbalancerHost string) v1beta1.Ingress {
 	return v1beta1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
@@ -551,8 +736,8 @@ func newIngress(specHost string, loadbalancerHost string) v1beta1.Ingress {
 			},
 		},
 		Status: v1beta1.IngressStatus{
-			LoadBalancer: v1.LoadBalancerStatus{
-				Ingress: []v1.LoadBalancerIngress{
+			LoadBalancer: v1beta1.IngressLoadBalancerStatus{
+				Ingress: []v1beta1.IngressLoadBalancerIngress{
 					{Hostname: loadbalancerHost},
 				},
 			},
@@ -570,6 +755,20 @@ func newGenericIngress(specHost string, loadbalancerHost string) *k8s.Ingress {
 	}
 }
 
+func newGenericIngressWithAnnotations(specHost string, loadbalancerHost string, annotations map[string]string) *k8s.Ingress {
+	mergedAnnotations := map[string]string{
+		"kubernetes.io/ingress.class": "bar",
+	}
+	for k, v := range annotations {
+		mergedAnnotations[k] = v
+	}
+	return &k8s.Ingress{
+		Annotations: mergedAnnotations,
+		RulesHosts:  []string{specHost},
+		Upstreams:   []string{loadbalancerHost},
+	}
+}
+
 func newIngressIP(specHost string, loadbalancerHost string) *k8s.Ingress {
 	return &k8s.Ingress{
 		Annotations: map[string]string{
@@ -577,5 +776,137 @@ func newIngressIP(specHost string, loadbalancerHost string) *k8s.Ingress {
 		},
 		RulesHosts: []string{specHost},
 		Upstreams:  []string{loadbalancerHost},
+	}
+}
+
+func TestStickySessionAnnotationParsing(t *testing.T) {
+	ingress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
+		"yggdrasil.uswitch.com/sticky-sessions":            "true",
+		"yggdrasil.uswitch.com/sticky-session-cookie-name": "my-session",
+		"yggdrasil.uswitch.com/sticky-session-cookie-path": "/",
+		"yggdrasil.uswitch.com/sticky-session-cookie-ttl":  "3600s",
+	})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+
+	if len(c.VirtualHosts) != 1 {
+		t.Fatal("expected 1 virtual host")
+	}
+	vhost := c.VirtualHosts[0]
+	if !vhost.StickySession {
+		t.Error("expected StickySession to be true")
+	}
+	if vhost.StickySessionCookieName != "my-session" {
+		t.Errorf("expected cookie name 'my-session', got '%s'", vhost.StickySessionCookieName)
+	}
+	if vhost.StickySessionCookiePath != "/" {
+		t.Errorf("expected cookie path '/', got '%s'", vhost.StickySessionCookiePath)
+	}
+	if vhost.StickySessionCookieTTL != 3600*time.Second {
+		t.Errorf("expected cookie TTL 3600s, got %v", vhost.StickySessionCookieTTL)
+	}
+}
+
+func TestStickySessionMissingAnnotations(t *testing.T) {
+	ingress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
+		"yggdrasil.uswitch.com/sticky-sessions": "true",
+	})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+
+	if len(c.VirtualHosts) != 1 {
+		t.Fatal("expected 1 virtual host")
+	}
+	if c.VirtualHosts[0].StickySession {
+		t.Error("expected StickySession to be false when required annotations are missing")
+	}
+}
+
+func TestStickySessionChangeOnFailureFalse(t *testing.T) {
+	ingress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
+		"yggdrasil.uswitch.com/sticky-sessions":                      "true",
+		"yggdrasil.uswitch.com/sticky-session-cookie-name":           "my-session",
+		"yggdrasil.uswitch.com/sticky-session-cookie-path":           "/",
+		"yggdrasil.uswitch.com/sticky-session-cookie-ttl":            "3600s",
+		"yggdrasil.uswitch.com/sticky-session-change-on-failure": "false",
+	})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+
+	if len(c.Clusters) != 1 {
+		t.Fatal("expected 1 cluster")
+	}
+	if c.Clusters[0].StickySessionChangeOnFailure == nil || *c.Clusters[0].StickySessionChangeOnFailure {
+		t.Error("expected StickySessionChangeOnFailure to be false")
+	}
+}
+
+func TestStickySessionChangeOnFailureDefault(t *testing.T) {
+	ingress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
+		"yggdrasil.uswitch.com/sticky-sessions":            "true",
+		"yggdrasil.uswitch.com/sticky-session-cookie-name": "my-session",
+		"yggdrasil.uswitch.com/sticky-session-cookie-path": "/",
+		"yggdrasil.uswitch.com/sticky-session-cookie-ttl":  "3600s",
+	})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+
+	if len(c.Clusters) != 1 {
+		t.Fatal("expected 1 cluster")
+	}
+	if c.Clusters[0].StickySessionChangeOnFailure == nil || !*c.Clusters[0].StickySessionChangeOnFailure {
+		t.Error("expected StickySessionChangeOnFailure to be true by default")
+	}
+}
+
+func TestStickySessionChangeOnFailureWithoutStickySessions(t *testing.T) {
+	ingress := newGenericIngressWithAnnotations("app.com", "foo.com", map[string]string{
+		"yggdrasil.uswitch.com/sticky-session-change-on-failure": "false",
+	})
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+
+	if len(c.Clusters) != 1 {
+		t.Fatal("expected 1 cluster")
+	}
+	if c.Clusters[0].StickySessionChangeOnFailure != nil {
+		t.Error("expected StickySessionChangeOnFailure to be nil when sticky sessions are disabled")
+	}
+}
+
+func TestStickySessionDisabled(t *testing.T) {
+	ingress := newGenericIngress("app.com", "foo.com")
+	timeouts := DefaultTimeouts{
+		Cluster: 30 * time.Second,
+		Route:   15 * time.Second,
+		PerTry:  5 * time.Second,
+	}
+	c := translateIngresses([]*k8s.Ingress{ingress}, false, []*v1.Secret{}, timeouts, "/var/log/envoy/")
+
+	if len(c.VirtualHosts) != 1 {
+		t.Fatal("expected 1 virtual host")
+	}
+	if c.VirtualHosts[0].StickySession {
+		t.Error("expected StickySession to be false when annotation is absent")
 	}
 }

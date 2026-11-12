@@ -3,8 +3,10 @@ package envoy
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	cal "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	v3cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -17,10 +19,14 @@ import (
 	gal "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
 	eauthz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	hcfg "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
-	tlsInspector "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
+	stateful_session "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/stateful_session/v3"
+	tls_inspector "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	cookie_session "github.com/envoyproxy/go-control-plane/envoy/extensions/http/stateful_session/cookie/v3"
 	previousHosts "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/host/previous_hosts/v3"
 	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	envoy_extension_http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
+	httpv3 "github.com/envoyproxy/go-control-plane/envoy/type/http/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	any "github.com/golang/protobuf/ptypes/any"
 	"github.com/golang/protobuf/ptypes/duration"
@@ -121,6 +127,40 @@ func makeVirtualHost(vhost *virtualHost, reselectionAttempts int64, defaultRetry
 			},
 		},
 	}
+
+	if vhost.StickySession {
+		cookieConfig := &cookie_session.CookieBasedSessionState{
+			Cookie: &httpv3.Cookie{
+				Name: vhost.StickySessionCookieName,
+				Ttl:  &duration.Duration{Seconds: int64(vhost.StickySessionCookieTTL.Seconds())},
+				Path: vhost.StickySessionCookiePath,
+			},
+		}
+		anyCookieConfig, err := anypb.New(cookieConfig)
+		if err != nil {
+			return &route.VirtualHost{}, fmt.Errorf("failed to marshal cookie session config: %s", err)
+		}
+
+		perRouteConfig := &stateful_session.StatefulSessionPerRoute{
+			Override: &stateful_session.StatefulSessionPerRoute_StatefulSession{
+				StatefulSession: &stateful_session.StatefulSession{
+					SessionState: &core.TypedExtensionConfig{
+						Name:        "envoy.http.stateful_session.cookie",
+						TypedConfig: anyCookieConfig,
+					},
+				},
+			},
+		}
+		anyPerRouteConfig, err := anypb.New(perRouteConfig)
+		if err != nil {
+			return &route.VirtualHost{}, fmt.Errorf("failed to marshal stateful session per-route config: %s", err)
+		}
+
+		virtualHost.TypedPerFilterConfig = map[string]*anypb.Any{
+			statefulSessionFilterName: anyPerRouteConfig,
+		}
+	}
+
 	return &virtualHost, nil
 }
 
@@ -181,7 +221,7 @@ func makeGrpcLoggerConfig(cfg HttpGrpcLogger) *gal.HttpGrpcAccessLogConfig {
 	}
 }
 
-func makeFileAccessLog(cfg AccessLogger) *eal.FileAccessLog {
+func makeFileAccessLog(cfg AccessLogger, accessLog string) *eal.FileAccessLog {
 	format := DefaultAccessLogFormat
 	if len(cfg.Format) > 0 {
 		format = cfg.Format
@@ -194,7 +234,7 @@ func makeFileAccessLog(cfg AccessLogger) *eal.FileAccessLog {
 	jsonFormat = b.GetStructValue()
 
 	accessLogConfig := &eal.FileAccessLog{
-		Path: "/var/log/envoy/access.log",
+		Path: filepath.Join(accessLog, "access.log"),
 		AccessLogFormat: &eal.FileAccessLog_LogFormat{
 			LogFormat: &core.SubstitutionFormatString{
 				Format: &core.SubstitutionFormatString_JsonFormat{
@@ -217,9 +257,9 @@ func makeZipkinTracingProvider() *tracing.ZipkinConfig {
 	return zipkinTracingProviderConfig
 }
 
-func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.VirtualHost) (*hcm.HttpConnectionManager, error) {
+func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.VirtualHost, accessLog string) (*hcm.HttpConnectionManager, error) {
 	// Access Logs
-	accessLogConfig := makeFileAccessLog(c.accessLogger)
+	accessLogConfig := makeFileAccessLog(c.accessLogger, accessLog)
 	anyAccessLogConfig, err := anypb.New(accessLogConfig)
 	if err != nil {
 		log.Fatalf("failed to marshal access log config struct to typed struct: %s", err)
@@ -267,6 +307,12 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 			ConfigType: &hcm.HttpFilter_TypedConfig{TypedConfig: anyExtAuthzConfig},
 		})
 	}
+
+	statefulSessionFilter, err := makeStatefulSessionFilter()
+	if err != nil {
+		log.Fatalf("failed to create stateful session filter: %s", err)
+	}
+	filterBuilder.Add(statefulSessionFilter)
 
 	filter, err := filterBuilder.Filters()
 	if err != nil {
@@ -319,14 +365,29 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 				VirtualHosts: virtualHosts,
 			},
 		},
-		Tracing:          tracingConfig,
-		AccessLog:        accessLoggers,
-		UseRemoteAddress: &wrapperspb.BoolValue{Value: c.useRemoteAddress},
+		Tracing:               tracingConfig,
+		AccessLog:             accessLoggers,
+		UseRemoteAddress:      &wrapperspb.BoolValue{Value: c.useRemoteAddress},
+		StripMatchingHostPort: true,
 	}, nil
 }
 
-func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtualHosts []*route.VirtualHost) (listener.FilterChain, error) {
-	httpConnectionManager, err := c.makeConnectionManager(virtualHosts)
+// tlsSignatureAlgorithms is the ordered list of signature algorithms Envoy may use
+// on downstream TLS 1.2 handshakes. SHA-1 variants are deliberately excluded.
+var tlsSignatureAlgorithms = []string{
+	"ecdsa_secp256r1_sha256",
+	"ecdsa_secp384r1_sha384",
+	"ecdsa_secp521r1_sha512",
+	"rsa_pss_rsae_sha256",
+	"rsa_pss_rsae_sha384",
+	"rsa_pss_rsae_sha512",
+	"rsa_pkcs1_sha256",
+	"rsa_pkcs1_sha384",
+	"rsa_pkcs1_sha512",
+}
+
+func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtualHosts []*route.VirtualHost, accessLog string) (listener.FilterChain, error) {
+	httpConnectionManager, err := c.makeConnectionManager(virtualHosts, accessLog)
 	if err != nil {
 		return listener.FilterChain{}, fmt.Errorf("failed to get httpConnectionManager: %s", err)
 	}
@@ -337,6 +398,7 @@ func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtua
 
 	tls := &auth.DownstreamTlsContext{}
 	tls.CommonTlsContext = &auth.CommonTlsContext{
+		AlpnProtocols: c.alpnProtocols,
 		TlsCertificates: []*auth.TlsCertificate{
 			{
 				CertificateChain: &core.DataSource{
@@ -347,6 +409,23 @@ func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtua
 				},
 			},
 		},
+		TlsParams: &auth.TlsParameters{
+			TlsMinimumProtocolVersion: auth.TlsParameters_TLSv1_2,
+			// BoringSSL defaults advertise SHA-1 signature algorithms (rsa_pkcs1_sha1, ecdsa_sha1)
+			// for TLS 1.2; restrict to SHA-2 so clients offering only SHA-1 are refused.
+			SignatureAlgorithms: tlsSignatureAlgorithms,
+		},
+	}
+	// If the certificate has a trusted CA, we set it in the TLS context (mTLS downstream)
+	if certificate.TrustedCa != "" {
+		tls.CommonTlsContext.ValidationContextType = &auth.CommonTlsContext_ValidationContext{
+			ValidationContext: &auth.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_InlineString{InlineString: certificate.TrustedCa},
+				},
+			},
+		}
+		tls.RequireClientCertificate = &wrappers.BoolValue{Value: true}
 	}
 
 	anyTls, err := anypb.New(tls)
@@ -383,27 +462,46 @@ func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtua
 	}, nil
 }
 
-func makeListener(filterChains []*listener.FilterChain, envoyListenerIpv4Address string, envoyListenPort uint32) (*listener.Listener, error) {
-	tlsInspectorConfig, err := anypb.New(&tlsInspector.TlsInspector{})
+func makeListener(filterChains []*listener.FilterChain, envoyListenerIpv4Address []string, envoyListenPort uint32) (*listener.Listener, error) {
+	tlsInspectorConfig, err := anypb.New(&tls_inspector.TlsInspector{})
 	if err != nil {
 		return &listener.Listener{}, fmt.Errorf("failed to marshal tls_inspector config struct to typed struct: %s", err)
 	}
 
-	if err != nil {
-		return &listener.Listener{}, fmt.Errorf("failed to marshal TLS config struct to typed struct: %s", err)
+	additional_addresses := make([]*listener.AdditionalAddress, len(envoyListenerIpv4Address)-1)
+	for i, address := range envoyListenerIpv4Address {
+		/// Skip the first address as it will be the principal address of the listener
+		if i == 0 {
+			continue
+		}
+		additional_address := listener.AdditionalAddress{
+			Address: &core.Address{
+				Address: &core.Address_SocketAddress{
+					SocketAddress: &core.SocketAddress{
+						Address: address,
+						PortSpecifier: &core.SocketAddress_PortValue{
+							PortValue: envoyListenPort,
+						},
+					},
+				},
+			},
+		}
+		additional_addresses[i-1] = &additional_address
 	}
+
 	listener := listener.Listener{
 		Name: "listener_0",
 		Address: &core.Address{
 			Address: &core.Address_SocketAddress{
 				SocketAddress: &core.SocketAddress{
-					Address: envoyListenerIpv4Address,
+					Address: envoyListenerIpv4Address[0],
 					PortSpecifier: &core.SocketAddress_PortValue{
 						PortValue: envoyListenPort,
 					},
 				},
 			},
 		},
+		AdditionalAddresses: additional_addresses,
 		ListenerFilters: []*listener.ListenerFilter{
 			{
 				Name:       "envoy.filters.listener.tls_inspector",
@@ -460,18 +558,31 @@ func makeHealthChecks(upstreamVHost string, healthPath string, config UpstreamHe
 	return healthChecks
 }
 
-func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPercentage int32, addresses []*core.Address) *v3cluster.Cluster {
+func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPercentage int32, addresses []*core.Address, dnsRefreshRate time.Duration) *v3cluster.Cluster {
 
 	tls := &auth.UpstreamTlsContext{}
-	if ca != "" {
+	trustedCa := &core.DataSource{Specifier: &core.DataSource_Filename{Filename: ca}}
+	if c.authTLSTrustedCa != "" {
+		trustedCa = &core.DataSource{Specifier: &core.DataSource_InlineString{InlineString: c.authTLSTrustedCa}}
+	}
+	if ca != "" || c.authTLSTrustedCa != "" {
 		tls.CommonTlsContext = &auth.CommonTlsContext{
 			ValidationContextType: &auth.CommonTlsContext_ValidationContext{
-				ValidationContext: &auth.CertificateValidationContext{
-					TrustedCa: &core.DataSource{
-						Specifier: &core.DataSource_Filename{Filename: ca},
+				ValidationContext: &auth.CertificateValidationContext{TrustedCa: trustedCa},
+			},
+		}
+		if c.authTLSVerifyClient == "true" {
+			tls.Sni = c.VirtualHost
+			tls.CommonTlsContext.TlsCertificates = []*auth.TlsCertificate{
+				{
+					CertificateChain: &core.DataSource{
+						Specifier: &core.DataSource_InlineString{InlineString: c.authTLSEnvoyClientCert},
+					},
+					PrivateKey: &core.DataSource{
+						Specifier: &core.DataSource_InlineString{InlineString: c.authTLSEnvoyClientKey},
 					},
 				},
-			},
+			}
 		}
 	} else {
 		tls = nil
@@ -487,7 +598,7 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 		}
 	}
 
-	healthChecks := makeHealthChecks(c.VirtualHost, c.HealthCheckPath, healthCfg)
+	healthChecks := makeHealthChecks(c.HealthCheckHost, c.HealthCheckPath, healthCfg)
 
 	endpoints := make([]*endpoint.LbEndpoint, len(addresses))
 
@@ -496,6 +607,60 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 			HostIdentifier:      &endpoint.LbEndpoint_Endpoint{Endpoint: &endpoint.Endpoint{Address: address}},
 			LoadBalancingWeight: &wrappers.UInt32Value{Value: c.Hosts[idx].Weight},
 		}
+	}
+
+	// Defaults: idle_timeout=60s (below nginx default keepalive_timeout of 75s),
+	// max_connection_duration=0s (disabled), max_requests_per_connection=10000
+	idleTimeout := int64(60)
+	if c.IdleTimeout != nil {
+		idleTimeout = int64(c.IdleTimeout.Seconds())
+	}
+	maxConnDuration := int64(0)
+	if c.MaxConnectionDuration != nil {
+		maxConnDuration = int64(c.MaxConnectionDuration.Seconds())
+	}
+	maxReqsPerConn := uint32(10000)
+	if c.MaxRequestsPerConnection != nil {
+		maxReqsPerConn = *c.MaxRequestsPerConnection
+	}
+
+	commonHttpOpts := &core.HttpProtocolOptions{
+		IdleTimeout:              &duration.Duration{Seconds: idleTimeout},
+		MaxConnectionDuration:    &durationpb.Duration{Seconds: maxConnDuration},
+		MaxRequestsPerConnection: &wrapperspb.UInt32Value{Value: maxReqsPerConn},
+	}
+
+	var httpOptions *envoy_extension_http.HttpProtocolOptions
+	if c.HttpVersion == "1.1" {
+		httpOptions = &envoy_extension_http.HttpProtocolOptions{
+			CommonHttpProtocolOptions: commonHttpOpts,
+			UpstreamProtocolOptions: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_{
+				ExplicitHttpConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig{
+					ProtocolConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_HttpProtocolOptions{
+						HttpProtocolOptions: &core.Http1ProtocolOptions{},
+					},
+				},
+			},
+		}
+	} else { // TODO be more specific, handle default version
+		httpOptions = &envoy_extension_http.HttpProtocolOptions{
+			CommonHttpProtocolOptions: commonHttpOpts,
+			UpstreamProtocolOptions: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_{
+				ExplicitHttpConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig{
+					ProtocolConfig: &envoy_extension_http.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{
+						Http2ProtocolOptions: &core.Http2ProtocolOptions{
+							AllowConnect:         true,
+							MaxConcurrentStreams: &wrapperspb.UInt32Value{Value: 128},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	httpOptionsPb, err := anypb.New(httpOptions)
+	if err != nil {
+		log.Fatalf("Error marshaling httpOptions: %s", err)
 	}
 
 	cluster := &v3cluster.Cluster{
@@ -509,6 +674,36 @@ func makeCluster(c cluster, ca string, healthCfg UpstreamHealthCheck, outlierPer
 			},
 		},
 		HealthChecks: healthChecks,
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": httpOptionsPb,
+		},
+		CircuitBreakers: &v3cluster.CircuitBreakers{
+			Thresholds: []*v3cluster.CircuitBreakers_Thresholds{
+				&v3cluster.CircuitBreakers_Thresholds{
+					Priority:           core.RoutingPriority_DEFAULT,
+					MaxConnections:     wrapperspb.UInt32(32768),
+					MaxRequests:        wrapperspb.UInt32(32768),
+					MaxPendingRequests: wrapperspb.UInt32(32768),
+				},
+			},
+		},
+	}
+	// The flag is validated in cmd/root.go; this guard only protects callers that skip WithDnsRefreshRate
+	// (a warning is logged by NewKubernetesConfigurator) so Envoy uses its 5s default instead of NACKing CDS
+	if dnsRefreshRate > 0 {
+		cluster.DnsRefreshRate = durationpb.New(dnsRefreshRate)
+	}
+	if c.StickySessionChangeOnFailure != nil && !*c.StickySessionChangeOnFailure {
+		cluster.CommonLbConfig = &v3cluster.Cluster_CommonLbConfig{
+			OverrideHostStatus: &core.HealthStatusSet{
+				Statuses: []core.HealthStatus{
+					core.HealthStatus_UNKNOWN,
+					core.HealthStatus_HEALTHY,
+					core.HealthStatus_UNHEALTHY,
+					core.HealthStatus_DEGRADED,
+				},
+			},
+		}
 	}
 	if outlierPercentage >= 0 {
 		cluster.OutlierDetection = &v3cluster.OutlierDetection{

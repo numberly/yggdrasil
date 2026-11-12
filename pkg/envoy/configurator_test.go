@@ -1,11 +1,14 @@
 package envoy
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	v3cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	auth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	tcache "github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/uswitch/yggdrasil/pkg/k8s"
 	v1 "k8s.io/api/core/v1"
@@ -52,7 +55,7 @@ func TestGenerate(t *testing.T) {
 
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*"}, Cert: "b", Key: "c"},
-	}, "d", []string{"bar"}, []string{"192.168.0.0/16"})
+	}, "d", []string{"bar"}, []string{"192.168.0.0/16"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
 
 	snapshot, _ := configurator.Generate(ingresses, []*v1.Secret{})
 
@@ -73,7 +76,7 @@ func TestGenerateMultipleCerts(t *testing.T) {
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
 		{Hosts: []string{"*.internal.api.co.uk"}, Cert: "couk", Key: "couk"},
-	}, "d", []string{"bar"}, []string{"192.168.0.0/16"})
+	}, "d", []string{"bar"}, []string{"192.168.0.0/16"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {
@@ -98,7 +101,7 @@ func TestGenerateMultipleHosts(t *testing.T) {
 
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com", "*.internal.api.co.uk"}, Cert: "com", Key: "com"},
-	}, "d", []string{"bar"}, []string{"192.168.0.0/16"})
+	}, "d", []string{"bar"}, []string{"192.168.0.0/16"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {
@@ -123,7 +126,7 @@ func TestGenerateNoMatchingCert(t *testing.T) {
 
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
-	}, "d", []string{"bar"}, []string{"192.168.0.0/16"})
+	}, "d", []string{"bar"}, []string{"192.168.0.0/16"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {
@@ -145,7 +148,7 @@ func TestGenerateIntoTwoCerts(t *testing.T) {
 	configurator := NewKubernetesConfigurator("a", []Certificate{
 		{Hosts: []string{"*.internal.api.com"}, Cert: "com", Key: "com"},
 		{Hosts: []string{"*"}, Cert: "all", Key: "all"},
-	}, "d", []string{"bar"}, []string{"192.168.0.0/16"})
+	}, "d", []string{"bar"}, []string{"192.168.0.0/16"}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
 
 	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
 	if err != nil {
@@ -163,6 +166,35 @@ func TestGenerateIntoTwoCerts(t *testing.T) {
 
 	assertNumberOfVirtualHosts(t, listener.FilterChains[1], 1)
 	assertServerNames(t, listener.FilterChains[1], nil)
+}
+
+func TestDynamicTLSFallbackRetainsMTLS(t *testing.T) {
+	configurator := NewKubernetesConfigurator("a", []Certificate{{Hosts: []string{"*"}, Cert: "cert", Key: "key"}}, "", nil, []string{}, "/var/log/envoy/", WithSyncSecrets(true), func(c *KubernetesConfigurator) {
+		c.envoyListenerIpv4Address = []string{"1.1.1.1"}
+	})
+
+	resources, err := configurator.generateDynamicTLSFilterChains(&envoyConfiguration{VirtualHosts: []*virtualHost{{
+		Host: "app.example.com", UpstreamCluster: "app", Timeout: time.Second, PerTryTimeout: time.Second, TrustedCa: "client-ca",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, filterChain := range resources {
+		if len(filterChain.FilterChainMatch.ServerNames) != 1 || filterChain.FilterChainMatch.ServerNames[0] != "app.example.com" {
+			continue
+		}
+		config, err := filterChain.TransportSocket.GetTypedConfig().UnmarshalNew()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tls, ok := config.(*auth.DownstreamTlsContext)
+		if !ok || !tls.GetRequireClientCertificate().GetValue() || tls.GetCommonTlsContext().GetValidationContext().GetTrustedCa().GetInlineString() != "client-ca" {
+			t.Fatal("default certificate fallback must retain client certificate validation")
+		}
+		return
+	}
+	t.Fatal("expected a host-specific fallback mTLS filter chain")
 }
 
 func TestGenerateListeners(t *testing.T) {
@@ -218,7 +250,7 @@ func TestGenerateListeners(t *testing.T) {
 	}
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			configurator := NewKubernetesConfigurator("a", tc.certs, "", nil, []string{})
+			configurator := NewKubernetesConfigurator("a", tc.certs, "", nil, []string{}, "/var/log/envoy/", func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
 			ret, err := configurator.generateListeners(&envoyConfiguration{VirtualHosts: tc.virtualHost})
 			if err != nil {
 				t.Fatalf("Error generating listeners %v", err)
@@ -232,7 +264,58 @@ func TestGenerateListeners(t *testing.T) {
 				if listener.FilterChains[0].FilterChainMatch == nil {
 					t.Fatalf("Expected filter chain")
 				}
+				assertNoSha1SignatureAlgorithms(t, listener.FilterChains[0])
 			}
 		})
+	}
+}
+
+func TestGenerateDnsRefreshRate(t *testing.T) {
+	ingresses := []*k8s.Ingress{
+		newGenericIngress("foo.internal.api.com", "bibble"),
+	}
+
+	dnsRefreshRate := 5 * time.Second
+	configurator := NewKubernetesConfigurator("a", []Certificate{
+		{Hosts: []string{"*"}, Cert: "b", Key: "c"},
+	}, "d", []string{"bar"}, []string{"192.168.0.0/16"}, "/var/log/envoy/", WithDnsRefreshRate(dnsRefreshRate), func(c *KubernetesConfigurator) { c.envoyListenerIpv4Address = []string{"1.1.1.1"} })
+
+	snapshot, err := configurator.Generate(ingresses, []*v1.Secret{})
+	if err != nil {
+		t.Fatalf("Error generating snapshot %v", err)
+	}
+
+	clusters := snapshot.Resources[tcache.Cluster].Items
+	if len(clusters) != 1 {
+		t.Fatalf("Num clusters: %d expected %d", len(clusters), 1)
+	}
+
+	var got *v3cluster.Cluster
+	for _, r := range clusters {
+		got = r.Resource.(*v3cluster.Cluster)
+	}
+
+	if got.DnsRefreshRate == nil {
+		t.Fatal("expected DnsRefreshRate to be set, got nil")
+	}
+	if got.DnsRefreshRate.AsDuration() != dnsRefreshRate {
+		t.Fatalf("DnsRefreshRate: %v expected %v", got.DnsRefreshRate.AsDuration(), dnsRefreshRate)
+	}
+}
+
+func assertNoSha1SignatureAlgorithms(t *testing.T, fc *listener.FilterChain) {
+	t.Helper()
+	tls := &auth.DownstreamTlsContext{}
+	if err := fc.TransportSocket.GetTypedConfig().UnmarshalTo(tls); err != nil {
+		t.Fatalf("failed to unmarshal DownstreamTlsContext: %v", err)
+	}
+	algs := tls.CommonTlsContext.TlsParams.GetSignatureAlgorithms()
+	if len(algs) == 0 {
+		t.Fatalf("expected explicit signature_algorithms, got none (BoringSSL default includes SHA-1)")
+	}
+	for _, a := range algs {
+		if strings.HasSuffix(a, "sha1") {
+			t.Fatalf("SHA-1 signature algorithm must not be advertised: %s", a)
+		}
 	}
 }

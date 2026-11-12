@@ -3,6 +3,7 @@ package envoy
 import (
 	"errors"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,9 +19,10 @@ import (
 )
 
 type Certificate struct {
-	Hosts []string `json:"hosts"`
-	Cert  string   `json:"cert"`
-	Key   string   `json:"key"`
+	Hosts     []string `json:"hosts"`
+	Cert      string   `json:"cert"`
+	Key       string   `json:"key"`
+	TrustedCa string   `json:"TrustedCa,omitempty"` // ommited if empty, used for mTLS downstream
 }
 
 type UpstreamHealthCheck struct {
@@ -63,13 +65,15 @@ type KubernetesConfigurator struct {
 	internalCidrRanges         []string
 	nodeID                     string
 	syncSecrets                bool
+	accessLog                  string
 	certificates               []Certificate
 	trustCA                    string
 	upstreamPort               uint32
 	envoyListenPort            uint32
-	envoyListenerIpv4Address   string
+	envoyListenerIpv4Address   []string
 	outlierPercentage          int32
 	hostSelectionRetryAttempts int64
+	dnsRefreshRate             time.Duration
 	upstreamHealthCheck        UpstreamHealthCheck
 	useRemoteAddress           bool
 	httpExtAuthz               HttpExtAuthz
@@ -78,6 +82,7 @@ type KubernetesConfigurator struct {
 	accessLogger               AccessLogger
 	defaultRetryOn             string
 	tracingProvider            string
+	alpnProtocols              []string
 
 	previousConfig  *envoyConfiguration
 	listenerVersion string
@@ -86,12 +91,34 @@ type KubernetesConfigurator struct {
 }
 
 // NewKubernetesConfigurator returns a Kubernetes configurator given a lister and ingress class
-func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca string, ingressClasses []string, internalCidrRanges []string, options ...option) *KubernetesConfigurator {
-	c := &KubernetesConfigurator{ingressClasses: ingressClasses, nodeID: nodeID, certificates: certificates, trustCA: ca, internalCidrRanges: internalCidrRanges}
+func NewKubernetesConfigurator(nodeID string, certificates []Certificate, ca string, ingressClasses []string, internalCidrRanges []string, accessLog string, options ...option) *KubernetesConfigurator {
+	c := &KubernetesConfigurator{ingressClasses: ingressClasses, nodeID: nodeID, certificates: certificates, trustCA: ca, internalCidrRanges: internalCidrRanges, accessLog: accessLog}
 	for _, opt := range options {
 		opt(c)
 	}
+	if c.dnsRefreshRate <= 0 {
+		logrus.Warnf("dnsRefreshRate not configured (%v), clusters will use Envoy's default dns_refresh_rate", c.dnsRefreshRate)
+	}
 	return c
+}
+
+func (c *KubernetesConfigurator) ValidateAndFormatPath() {
+	if c.accessLog == "" {
+		logrus.Fatal("accessLog path cannot be empty")
+	}
+
+	// Clean the path and make it absolute
+	c.accessLog = filepath.Clean(c.accessLog)
+	absolutePath, err := filepath.Abs(c.accessLog)
+	if err != nil {
+		logrus.Fatalf("invalid path: %v", err)
+	}
+	c.accessLog = absolutePath
+
+	// Ensure the path ends with a directory separator if it's a directory
+	if strings.HasSuffix(c.accessLog, string(filepath.Separator)) {
+		c.accessLog = string(filepath.Separator)
+	}
 }
 
 // Generate creates a new snapshot
@@ -100,7 +127,7 @@ func (c *KubernetesConfigurator) Generate(ingresses []*k8s.Ingress, secrets []*v
 	defer c.Unlock()
 
 	validIngresses := validIngressFilter(classFilter(ingresses, c.ingressClasses))
-	config := translateIngresses(validIngresses, c.syncSecrets, secrets, c.defaultTimeouts)
+	config := translateIngresses(validIngresses, c.syncSecrets, secrets, c.defaultTimeouts, c.accessLog)
 
 	vmatch, cmatch := config.equals(c.previousConfig)
 
@@ -204,15 +231,28 @@ func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyCon
 				logrus.Warnf("skipping vhost because of no certificate: %s", virtualHost.Host)
 			} else {
 				logrus.Infof("using default certificate for %s", virtualHost.Host)
+				if virtualHost.TrustedCa != "" {
+					filterChain, err := c.makeFilterChain(Certificate{
+						Hosts:     []string{virtualHost.Host},
+						Cert:      c.certificates[0].Cert,
+						Key:       c.certificates[0].Key,
+						TrustedCa: virtualHost.TrustedCa,
+					}, []*route.VirtualHost{envoyVhost}, config.AccessLog)
+					if err != nil {
+						return nil, err
+					}
+					filterChains = append(filterChains, &filterChain)
+				}
 			}
 			continue
 		}
 		certificate := Certificate{
-			Hosts: []string{virtualHost.Host},
-			Cert:  virtualHost.TlsCert,
-			Key:   virtualHost.TlsKey,
+			Hosts:     []string{virtualHost.Host},
+			Cert:      virtualHost.TlsCert,
+			Key:       virtualHost.TlsKey,
+			TrustedCa: virtualHost.TrustedCa,
 		}
-		filterChain, err := c.makeFilterChain(certificate, []*route.VirtualHost{envoyVhost})
+		filterChain, err := c.makeFilterChain(certificate, []*route.VirtualHost{envoyVhost}, config.AccessLog)
 		if err != nil {
 			logrus.Warnf("error making filter chain: %v", err)
 		}
@@ -225,7 +265,7 @@ func (c *KubernetesConfigurator) generateDynamicTLSFilterChains(config *envoyCon
 			Cert:  c.certificates[0].Cert,
 			Key:   c.certificates[0].Key,
 		}
-		if defaultFC, err := c.makeFilterChain(defaultCert, allVhosts); err != nil {
+		if defaultFC, err := c.makeFilterChain(defaultCert, allVhosts, config.AccessLog); err != nil {
 			logrus.Warnf("error making default filter chain: %v", err)
 		} else {
 			filterChains = append(filterChains, &defaultFC)
@@ -245,7 +285,7 @@ func (c *KubernetesConfigurator) generateHTTPFilterChain(config *envoyConfigurat
 		virtualHosts = append(virtualHosts, vhost)
 	}
 
-	httpConnectionManager, err := c.makeConnectionManager(virtualHosts)
+	httpConnectionManager, err := c.makeConnectionManager(virtualHosts, config.AccessLog)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +331,7 @@ func (c *KubernetesConfigurator) generateTLSFilterChains(config *envoyConfigurat
 			continue
 		}
 
-		filterChain, err := c.makeFilterChain(certificate, virtualHosts)
+		filterChain, err := c.makeFilterChain(certificate, virtualHosts, config.AccessLog)
 		if err != nil {
 			log.Printf("error making filter chain: %v", err)
 		}
@@ -306,7 +346,7 @@ func (c *KubernetesConfigurator) generateClusters(config *envoyConfiguration) []
 
 	for _, cluster := range config.Clusters {
 		addresses := makeAddresses(cluster.Hosts, c.upstreamPort)
-		cluster := makeCluster(*cluster, c.trustCA, c.upstreamHealthCheck, c.outlierPercentage, addresses)
+		cluster := makeCluster(*cluster, c.trustCA, c.upstreamHealthCheck, c.outlierPercentage, addresses, c.dnsRefreshRate)
 		clusters = append(clusters, cluster)
 	}
 

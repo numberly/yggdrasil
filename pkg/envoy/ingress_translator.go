@@ -16,6 +16,17 @@ import (
 	v1 "k8s.io/api/core/v1"
 )
 
+type UpstreamInfo struct {
+	RuleHost    string
+	Upstream    string
+	Namespace   string
+	Class       string
+	ClusterName string
+	IngressName string
+}
+
+var previousUpstreams = make(map[string]UpstreamInfo)
+
 func sortCluster(clusters []*cluster) {
 	sort.Slice(clusters, func(i int, j int) bool {
 		return clusters[i].identity() < clusters[j].identity()
@@ -65,6 +76,7 @@ func VirtualHostsEquals(a, b []*virtualHost) bool {
 type envoyConfiguration struct {
 	VirtualHosts []*virtualHost
 	Clusters     []*cluster
+	AccessLog    string
 }
 
 type virtualHost struct {
@@ -74,7 +86,13 @@ type virtualHost struct {
 	PerTryTimeout   time.Duration
 	TlsKey          string
 	TlsCert         string
+	TrustedCa       string // CA certificate for mTLS downstream
 	RetryOn         string
+
+	StickySession           bool
+	StickySessionCookieName string
+	StickySessionCookiePath string
+	StickySessionCookieTTL  time.Duration
 }
 
 func (v *virtualHost) Equals(other *virtualHost) bool {
@@ -88,7 +106,12 @@ func (v *virtualHost) Equals(other *virtualHost) bool {
 		v.PerTryTimeout == other.PerTryTimeout &&
 		v.TlsKey == other.TlsKey &&
 		v.TlsCert == other.TlsCert &&
-		v.RetryOn == other.RetryOn
+		v.TrustedCa == other.TrustedCa &&
+		v.RetryOn == other.RetryOn &&
+		v.StickySession == other.StickySession &&
+		v.StickySessionCookieName == other.StickySessionCookieName &&
+		v.StickySessionCookiePath == other.StickySessionCookiePath &&
+		v.StickySessionCookieTTL == other.StickySessionCookieTTL
 }
 
 type LBHost struct {
@@ -97,11 +120,52 @@ type LBHost struct {
 }
 
 type cluster struct {
-	Name            string
-	VirtualHost     string
-	HealthCheckPath string
-	Timeout         time.Duration
-	Hosts           []LBHost
+	Name                         string
+	VirtualHost                  string
+	HealthCheckPath              string
+	HealthCheckHost              string // with Wildcard, the HealthCheck host can be different than the VirtualHost
+	HttpVersion                  string
+	Timeout                      time.Duration
+	Hosts                        []LBHost
+	authTLSSecret                string // the secret name of the CA : could be "ca-secret"
+	authTLSVerifyClient          string // Verify or not the client cert (can be either true or false)
+	authTLSTrustedCa             string // CA used by Envoy to verify the upstream
+	authTLSEnvoyClientCert       string // the envoy cert, if authTLSSecret is set, this will be used for mTLS between envoy and the backend
+	authTLSEnvoyClientKey        string // the envoy key, if authTLSSecret is set, this will be used for mTLS between envoy and the backend
+	StickySessionChangeOnFailure *bool // nil = not set (sticky sessions disabled), false = persist to unhealthy backend
+	IdleTimeout                  *time.Duration
+	MaxConnectionDuration        *time.Duration
+	MaxRequestsPerConnection     *uint32
+}
+
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func durationPtrEqual(a, b *time.Duration) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func uint32PtrEqual(a, b *uint32) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 
 func (c *cluster) identity() string {
@@ -125,11 +189,46 @@ func (c *cluster) Equals(other *cluster) bool {
 		return false
 	}
 
+	if c.HealthCheckHost != other.HealthCheckHost {
+		return false
+	}
+
 	if c.HealthCheckPath != other.HealthCheckPath {
 		return false
 	}
 
+	if c.authTLSSecret != other.authTLSSecret {
+		return false
+	}
+
+	if c.authTLSVerifyClient != other.authTLSVerifyClient ||
+		c.authTLSTrustedCa != other.authTLSTrustedCa ||
+		c.authTLSEnvoyClientCert != other.authTLSEnvoyClientCert ||
+		c.authTLSEnvoyClientKey != other.authTLSEnvoyClientKey {
+		return false
+	}
+
 	if len(c.Hosts) != len(other.Hosts) {
+		return false
+	}
+
+	if c.HttpVersion != other.HttpVersion {
+		return false
+	}
+
+	if !boolPtrEqual(c.StickySessionChangeOnFailure, other.StickySessionChangeOnFailure) {
+		return false
+	}
+
+	if !durationPtrEqual(c.IdleTimeout, other.IdleTimeout) {
+		return false
+	}
+
+	if !durationPtrEqual(c.MaxConnectionDuration, other.MaxConnectionDuration) {
+		return false
+	}
+
+	if !uint32PtrEqual(c.MaxRequestsPerConnection, other.MaxRequestsPerConnection) {
 		return false
 	}
 
@@ -205,21 +304,49 @@ func newEnvoyIngress(host string, timeouts DefaultTimeouts) *envoyIngress {
 			PerTryTimeout:   timeouts.PerTry,
 		},
 		cluster: &cluster{
-			Name:            clusterName,
-			VirtualHost:     host,
-			Hosts:           []LBHost{},
-			Timeout:         (30 * time.Second),
-			HealthCheckPath: "",
+			Name:                clusterName,
+			VirtualHost:         host,
+			Hosts:               []LBHost{},
+			Timeout:             timeouts.Cluster,
+			HealthCheckPath:     "",
+			HealthCheckHost:     host,
+			authTLSSecret:       "",
+			authTLSVerifyClient: "false",
 		},
 	}
 }
 
 func (ing *envoyIngress) addUpstream(host string, weight uint32) {
-	ing.cluster.Hosts = append(ing.cluster.Hosts, LBHost{host, weight})
+	// Check if the host is already in the list
+	// If we wan't to avoid using a for loop, maybe we could implement a Map for a faster lookup.
+	// time complexity O(1) vs 0(n) for each iteration.
+	for _, h := range ing.cluster.Hosts {
+		if h.Host == host {
+			// Host found, so we don't add the duplicate
+			logrus.Debugf("Duplicate host found for upstream, not adding : %s for cluster : %s", host, ing.cluster.Name)
+			return
+		}
+	}
+
+	// No duplicate found, append the new host
+	ing.cluster.Hosts = append(ing.cluster.Hosts, LBHost{Host: host, Weight: weight})
+	logrus.Debugf("Host added on upstream list : %s for cluster : %s", host, ing.cluster.Name)
 }
 
 func (ing *envoyIngress) addHealthCheckPath(path string) {
 	ing.cluster.HealthCheckPath = path
+}
+
+func (ing *envoyIngress) removeHealthCheckPath() {
+	ing.cluster.HealthCheckPath = ""
+}
+
+func (ing *envoyIngress) addHealthCheckHost(host string) {
+	ing.cluster.HealthCheckHost = host
+}
+
+func (ing *envoyIngress) removeHealthCheckHost() {
+	ing.cluster.HealthCheckHost = ""
 }
 
 func (ing *envoyIngress) addTimeout(timeout time.Duration) {
@@ -238,6 +365,30 @@ func (ing *envoyIngress) setRouteTimeout(timeout time.Duration) {
 
 func (ing *envoyIngress) setPerTryTimeout(timeout time.Duration) {
 	ing.vhost.PerTryTimeout = timeout
+}
+
+func (ing *envoyIngress) setUpstreamHttpVersion(version string) {
+	ing.cluster.HttpVersion = version
+}
+
+func (ing *envoyIngress) setAuthTlsSecret(version string) {
+	ing.cluster.authTLSSecret = version
+}
+
+func (ing *envoyIngress) setAuthTlsVerifyClient(verify string) {
+	ing.cluster.authTLSVerifyClient = verify
+}
+
+func (ing *envoyIngress) setAuthTlsTrustedCa(ca string) {
+	ing.cluster.authTLSTrustedCa = ca
+}
+
+func (ing *envoyIngress) setAuthTlsEnvoyClientCert(cert string) {
+	ing.cluster.authTLSEnvoyClientCert = cert
+}
+
+func (ing *envoyIngress) setAuthTlsEnvoyClientKey(key string) {
+	ing.cluster.authTLSEnvoyClientKey = key
 }
 
 // hostMatch returns true if tlsHost and ruleHost match, with wildcard support
@@ -272,6 +423,21 @@ func getHostTlsSecret(ingress *k8s.Ingress, host string, secrets []*v1.Secret) (
 	return nil, fmt.Errorf("ingress %s/%s - %s has no tls secret configured", ingress.Namespace, ingress.Name, host)
 }
 
+// getCaTlsSecret returns the CA tls secret configured for a given ingress
+func getCaTlsSecret(ingress *k8s.Ingress, secrets []*v1.Secret) (*v1.Secret, error) {
+	caSecretName := ingress.Annotations["yggdrasil.uswitch.com/auth-tls-secret"]
+	if caSecretName == "" {
+		return nil, fmt.Errorf("auth-tls-secret not configured for ingress %s/%s", ingress.Namespace, ingress.Name)
+	}
+
+	for _, secret := range secrets {
+		if secret.Namespace == ingress.Namespace && secret.Name == caSecretName {
+			return secret, nil
+		}
+	}
+	return nil, fmt.Errorf("auth-tls-secret %s/%s not found", ingress.Namespace, caSecretName)
+}
+
 // validateTlsSecret checks that the given secret holds valid tls certificate and key
 func validateTlsSecret(secret *v1.Secret) (bool, error) {
 	tlsCert, certOk := secret.Data["tls.crt"]
@@ -286,8 +452,8 @@ func validateTlsSecret(secret *v1.Secret) (bool, error) {
 		return false, nil
 	}
 
-	// discard P-384 EC private keys
-	// see https://github.com/envoyproxy/envoy/issues/10855
+	// discard > P-521 EC private keys
+	// P-256, P-384 & P-521 are now supported (see https://github.com/envoyproxy/envoy/issues/10855)
 	block, _ := pem.Decode(tlsCert)
 	if block == nil {
 		return false, fmt.Errorf("error parsing x509 certificate - no PEM block found")
@@ -301,12 +467,38 @@ func validateTlsSecret(secret *v1.Secret) (bool, error) {
 		if !ok {
 			return false, fmt.Errorf("error in *ecdsa.PublicKey type assertion")
 		}
-		if ecdsaPub.Curve.Params().BitSize > 256 {
-			logrus.Infof("skipping ECDSA %s certificate %s/%s: only P-256 certificates are supported", ecdsaPub.Curve.Params().Name, secret.Namespace, secret.Name)
+		if ecdsaPub.Curve.Params().BitSize > 521 {
+			logrus.Infof("skipping ECDSA %s certificate %s/%s: only P-256, P-384 and P-521 certificates are supported", ecdsaPub.Curve.Params().Name, secret.Namespace, secret.Name)
 			return false, nil
 		}
 	}
 	return true, nil
+}
+
+func (envoyIng *envoyIngress) addStickySession(ingress *k8s.Ingress) {
+	if ingress.Annotations["yggdrasil.uswitch.com/sticky-sessions"] != "true" {
+		return
+	}
+	cookieName := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-name"]
+	cookiePath := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-path"]
+	cookieTTLStr := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-cookie-ttl"]
+
+	if cookieName == "" || cookiePath == "" || cookieTTLStr == "" {
+		logrus.Warnf("sticky-sessions enabled for ingress %s/%s but missing required annotations (cookie-name, cookie-path, cookie-ttl), skipping sticky sessions", ingress.Namespace, ingress.Name)
+		return
+	}
+	cookieTTL, err := time.ParseDuration(cookieTTLStr)
+	if err != nil {
+		logrus.Warnf("invalid sticky-session-cookie-ttl for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
+		return
+	}
+	envoyIng.vhost.StickySession = true
+	envoyIng.vhost.StickySessionCookieName = cookieName
+	envoyIng.vhost.StickySessionCookiePath = cookiePath
+	envoyIng.vhost.StickySessionCookieTTL = cookieTTL
+
+	changeOnFailure := ingress.Annotations["yggdrasil.uswitch.com/sticky-session-change-on-failure"] != "false"
+	envoyIng.cluster.StickySessionChangeOnFailure = &changeOnFailure
 }
 
 func (envoyIng *envoyIngress) addRetryOn(ingress *k8s.Ingress) {
@@ -320,82 +512,236 @@ func (envoyIng *envoyIngress) addRetryOn(ingress *k8s.Ingress) {
 	}
 }
 
-func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v1.Secret, timeouts DefaultTimeouts) *envoyConfiguration {
+// isWildcard checks if the given host rule is a wildcard.
+func isWildcard(ruleHost string) bool {
+	// Check if the ruleHost starts with '*.'
+	return strings.HasPrefix(ruleHost, "*.")
+}
+
+func validateSubdomain(ruleHost, host string) bool {
+	if strings.HasPrefix(ruleHost, "*.") {
+		ruleHost = ruleHost[2:]
+	}
+	return strings.HasSuffix(host, ruleHost)
+}
+
+func translateIngresses(ingresses []*k8s.Ingress, syncSecrets bool, secrets []*v1.Secret, timeouts DefaultTimeouts, accessLog string) *envoyConfiguration {
 	cfg := &envoyConfiguration{}
 	envoyIngresses := map[string]*envoyIngress{}
+	ruleHostToIngresses := map[string][]*k8s.Ingress{}
+	currentUpstreams := make(map[string]UpstreamInfo)
 
 	for _, i := range ingresses {
-		for _, j := range i.Upstreams {
-			for _, ruleHost := range i.RulesHosts {
-				_, ok := envoyIngresses[ruleHost]
-				if !ok {
-					envoyIngresses[ruleHost] = newEnvoyIngress(ruleHost, timeouts)
+		for _, ruleHost := range i.RulesHosts {
+			ruleHostToIngresses[ruleHost] = append(ruleHostToIngresses[ruleHost], i)
+		}
+	}
+
+	for ruleHost, ingressList := range ruleHostToIngresses {
+		isWildcard := isWildcard(ruleHost)
+
+		if _, ok := envoyIngresses[ruleHost]; !ok {
+			envoyIngresses[ruleHost] = newEnvoyIngress(ruleHost, timeouts)
+		}
+
+		envoyIngress := envoyIngresses[ruleHost]
+
+		// Determine if any ingress is not in maintenance mode
+		hasNonMaintenance := false
+		for _, ingress := range ingressList {
+			if !ingress.Maintenance {
+				hasNonMaintenance = true
+				break
+			}
+		}
+
+		// Add upstreams based on maintenance status
+		for _, ingress := range ingressList {
+			for _, j := range ingress.Upstreams {
+				// Skip this upstream if cluster is in maintenance but keep it if no other cluster can serve it
+				if !hasNonMaintenance || !ingress.Maintenance {
+					// Check if the upstream is already added
+					exists := false
+					for _, host := range envoyIngress.cluster.Hosts {
+						if host.Host == j {
+							exists = true
+							break
+						}
+					}
+					if exists {
+						continue // skip if the upstream already exists
+					}
+
+					class := "none"
+					if ingress.Class != nil {
+						class = *ingress.Class
+					}
+
+					// Add upstream
+					if weight64, err := strconv.ParseUint(ingress.Annotations["yggdrasil.uswitch.com/weight"], 10, 32); err == nil {
+						if weight64 != 0 {
+							envoyIngress.addUpstream(j, uint32(weight64))
+						}
+					} else {
+						envoyIngress.addUpstream(j, 1)
+					}
+					upstreamKey := fmt.Sprintf("%s-%s", ruleHost, j)
+					currentUpstreams[upstreamKey] = UpstreamInfo{
+						RuleHost:    strings.ReplaceAll(ruleHost, ".", "_"),
+						Upstream:    j,
+						Namespace:   ingress.Namespace,
+						Class:       class,
+						ClusterName: ingress.KubernetesClusterName,
+						IngressName: ingress.Name,
+					}
+
+					EnvoyUpstreamInfo.WithLabelValues(strings.ReplaceAll(ruleHost, ".", "_"), j, ingress.Namespace, class, ingress.KubernetesClusterName, ingress.Name).Set(float64(1))
+				} else {
+					logrus.Warnf("Endpoint is in maintenance mode, upstream %s will not be added for host %s", j, ruleHost)
 				}
+			}
 
-				envoyIngress := envoyIngresses[ruleHost]
-
-				if weight64, err := strconv.ParseUint(i.Annotations["yggdrasil.uswitch.com/weight"], 10, 32); err == nil {
-					if weight64 != 0 {
-						envoyIngress.addUpstream(j, uint32(weight64))
+			if isWildcard {
+				if ingress.Annotations["yggdrasil.uswitch.com/healthcheck-host"] != "" {
+					envoyIngress.addHealthCheckHost(ingress.Annotations["yggdrasil.uswitch.com/healthcheck-host"])
+					if !validateSubdomain(ruleHost, envoyIngress.cluster.HealthCheckHost) {
+						logrus.Warnf("Healthcheck %s is not on the same subdomain for %s, annotation will be skipped", envoyIngress.cluster.HealthCheckHost, ruleHost)
+						envoyIngress.cluster.HealthCheckHost = ruleHost
 					}
 				} else {
-					envoyIngress.addUpstream(j, 1)
+					logrus.Warnf("Be careful, healthcheck can't work for wildcard host : %s", envoyIngress.cluster.HealthCheckHost)
 				}
+			}
 
-				if i.Annotations["yggdrasil.uswitch.com/healthcheck-path"] != "" {
-					envoyIngress.addHealthCheckPath(i.Annotations["yggdrasil.uswitch.com/healthcheck-path"])
+			if ingress.Annotations["yggdrasil.uswitch.com/healthcheck-path"] != "" {
+				envoyIngress.addHealthCheckPath(ingress.Annotations["yggdrasil.uswitch.com/healthcheck-path"])
+			}
+
+			if ingress.Annotations["yggdrasil.uswitch.com/timeout"] != "" {
+				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/timeout"])
+				if err == nil {
+					envoyIngress.addTimeout(timeout)
 				}
+			}
 
-				if i.Annotations["yggdrasil.uswitch.com/timeout"] != "" {
-					timeout, err := time.ParseDuration(i.Annotations["yggdrasil.uswitch.com/timeout"])
-					if err == nil {
-						envoyIngress.addTimeout(timeout)
+			if ingress.Annotations["yggdrasil.uswitch.com/cluster-timeout"] != "" {
+				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/cluster-timeout"])
+				if err == nil {
+					envoyIngress.setClusterTimeout(timeout)
+				}
+			}
+
+			if ingress.Annotations["yggdrasil.uswitch.com/route-timeout"] != "" {
+				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/route-timeout"])
+				if err == nil {
+					envoyIngress.setRouteTimeout(timeout)
+				}
+			}
+
+			if ingress.Annotations["yggdrasil.uswitch.com/per-try-timeout"] != "" {
+				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/per-try-timeout"])
+				if err == nil {
+					envoyIngress.setPerTryTimeout(timeout)
+				}
+			}
+
+			if ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"] != "" {
+				// TODO validate, add error path
+				envoyIngress.setUpstreamHttpVersion(ingress.Annotations["yggdrasil.uswitch.com/upstream-http-version"])
+			}
+			if ingress.Annotations["yggdrasil.uswitch.com/auth-tls-verify-client"] != "" {
+				val := ingress.Annotations["yggdrasil.uswitch.com/auth-tls-verify-client"]
+				switch val {
+				case "false":
+					// mTLS is disabled by default.
+				case "true":
+					caSecret, err := getCaTlsSecret(ingress, secrets)
+					if err != nil {
+						logrus.Warnf("failed to retrieve auth-tls-secret for %s/%s: %s", ingress.Namespace, ingress.Name, err)
+						break
 					}
-				}
 
-				if i.Annotations["yggdrasil.uswitch.com/cluster-timeout"] != "" {
-					timeout, err := time.ParseDuration(i.Annotations["yggdrasil.uswitch.com/cluster-timeout"])
-					if err == nil {
-						envoyIngress.setClusterTimeout(timeout)
+					caCert := string(caSecret.Data["ca.crt"])
+					envoyClientCert := string(caSecret.Data["tls.crt"])
+					envoyClientKey := string(caSecret.Data["tls.key"])
+					if caCert == "" || envoyClientCert == "" || envoyClientKey == "" {
+						logrus.Warnf("auth-tls-secret %s/%s must contain ca.crt, tls.crt, and tls.key", caSecret.Namespace, caSecret.Name)
+						break
 					}
+
+					envoyIngress.setAuthTlsSecret(fmt.Sprintf("%s/%s", caSecret.Namespace, caSecret.Name))
+					envoyIngress.vhost.TrustedCa = caCert
+					envoyIngress.setAuthTlsTrustedCa(caCert)
+					envoyIngress.setAuthTlsEnvoyClientCert(envoyClientCert)
+					envoyIngress.setAuthTlsEnvoyClientKey(envoyClientKey)
+					envoyIngress.setAuthTlsVerifyClient("true")
+				default:
+					logrus.Warnf("auth-tls-verify-client should be true or false, got `%s`, setting by default false", val)
 				}
+			}
 
-				if i.Annotations["yggdrasil.uswitch.com/route-timeout"] != "" {
-					timeout, err := time.ParseDuration(i.Annotations["yggdrasil.uswitch.com/route-timeout"])
-					if err == nil {
-						envoyIngress.setRouteTimeout(timeout)
-					}
+			if ingress.Annotations["yggdrasil.uswitch.com/idle-timeout"] != "" {
+				timeout, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/idle-timeout"])
+				if err == nil {
+					envoyIngress.cluster.IdleTimeout = &timeout
+				} else {
+					logrus.Warnf("invalid idle-timeout for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
 				}
+			}
 
-				if i.Annotations["yggdrasil.uswitch.com/per-try-timeout"] != "" {
-					timeout, err := time.ParseDuration(i.Annotations["yggdrasil.uswitch.com/per-try-timeout"])
-					if err == nil {
-						envoyIngress.setPerTryTimeout(timeout)
-					}
+			if ingress.Annotations["yggdrasil.uswitch.com/max-connection-duration"] != "" {
+				dur, err := time.ParseDuration(ingress.Annotations["yggdrasil.uswitch.com/max-connection-duration"])
+				if err == nil {
+					envoyIngress.cluster.MaxConnectionDuration = &dur
+				} else {
+					logrus.Warnf("invalid max-connection-duration for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
 				}
+			}
 
-				envoyIngress.addRetryOn(i)
+			if ingress.Annotations["yggdrasil.uswitch.com/max-requests-per-connection"] != "" {
+				val, err := strconv.ParseUint(ingress.Annotations["yggdrasil.uswitch.com/max-requests-per-connection"], 10, 32)
+				if err == nil {
+					v := uint32(val)
+					envoyIngress.cluster.MaxRequestsPerConnection = &v
+				} else {
+					logrus.Warnf("invalid max-requests-per-connection for ingress %s/%s: %s", ingress.Namespace, ingress.Name, err)
+				}
+			}
 
-				if syncSecrets && envoyIngress.vhost.TlsKey == "" && envoyIngress.vhost.TlsCert == "" {
-					if hostTlsSecret, err := getHostTlsSecret(i, ruleHost, secrets); err != nil {
-						logrus.Infof("%s", err.Error())
-					} else {
-						valid, err := validateTlsSecret(hostTlsSecret)
-						if err != nil {
-							logrus.Warnf("secret %s/%s is not valid: %s", hostTlsSecret.Namespace, hostTlsSecret.Name, err.Error())
-						} else if valid {
-							envoyIngress.vhost.TlsKey = string(hostTlsSecret.Data["tls.key"])
-							envoyIngress.vhost.TlsCert = string(hostTlsSecret.Data["tls.crt"])
-						}
+			envoyIngress.addRetryOn(ingress)
+
+			envoyIngress.addStickySession(ingress)
+
+			if syncSecrets && envoyIngress.vhost.TlsKey == "" && envoyIngress.vhost.TlsCert == "" {
+				if hostTlsSecret, err := getHostTlsSecret(ingress, ruleHost, secrets); err != nil {
+					logrus.Infof("%s", err.Error())
+				} else {
+					valid, err := validateTlsSecret(hostTlsSecret)
+					if err != nil {
+						logrus.Warnf("secret %s/%s is not valid: %s", hostTlsSecret.Namespace, hostTlsSecret.Name, err.Error())
+					} else if valid {
+						envoyIngress.vhost.TlsKey = string(hostTlsSecret.Data["tls.key"])
+						envoyIngress.vhost.TlsCert = string(hostTlsSecret.Data["tls.crt"])
 					}
 				}
 			}
 		}
 	}
 
+	// Identify and remove upstreams that no longer exist
+	for upstreamKey, info := range previousUpstreams {
+		if _, exists := currentUpstreams[upstreamKey]; !exists {
+			EnvoyUpstreamInfo.DeleteLabelValues(info.RuleHost, info.Upstream, info.Namespace, info.Class, info.ClusterName, info.IngressName)
+		}
+	}
+
+	// Update the previous state
+	previousUpstreams = currentUpstreams
+
 	for _, ingress := range envoyIngresses {
 		cfg.Clusters = append(cfg.Clusters, ingress.cluster)
 		cfg.VirtualHosts = append(cfg.VirtualHosts, ingress.vhost)
+		cfg.AccessLog = accessLog
 	}
 
 	numVhosts.Set(float64(len(cfg.VirtualHosts)))

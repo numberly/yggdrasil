@@ -5,7 +5,7 @@
 ----
 Yggdrasil is an Envoy control plane that configures listeners and clusters based off Kubernetes ingresses from multiple Kube Clusters. This allows you to have an envoy cluster acting as a mutli-cluster loadbalancer for Kubernetes. This was something we needed as we wanted our apps to be highly available in the event of a cluster outage but did not want the solution to live inside of Kubernetes itself.
 
-`Note:` Currently we support versions 1.20.x to 1.29.x of Envoy.</br>
+`Note:` Currently we support versions 1.20.x to 1.34.x of Envoy.</br>
 `Note:` Yggdrasil now uses [Go modules](https://github.com/golang/go/wiki/Modules) to handle dependencies.
 
 ## Usage
@@ -79,15 +79,21 @@ Yggdrasil allows for some customisation of the route and cluster config per Ingr
 | Name                                                         | type     |
 |--------------------------------------------------------------|----------|
 | [yggdrasil.uswitch.com/healthcheck-path](#health-check-path) | string   |
+| [yggdrasil.uswitch.com/healthcheck-host](#health-check-host) | string   |
 | [yggdrasil.uswitch.com/timeout](#timeouts)                   | duration |
 | [yggdrasil.uswitch.com/cluster-timeout](#timeouts)           | duration |
 | [yggdrasil.uswitch.com/route-timeout](#timeouts)             | duration |
 | [yggdrasil.uswitch.com/per-try-timeout](#timeouts)           | duration |
 | [yggdrasil.uswitch.com/weight](#weight)                      | uint32   |
 | [yggdrasil.uswitch.com/retry-on](#retries)                   | string   |
+| [yggdrasil.uswitch.com/auth-tls-verify-client](#mtls)        | string   |
+| [yggdrasil.uswitch.com/auth-tls-secret](#mtls)               | string   |
 
 ### Health Check Path
 Specifies a path to configure a [HTTP health check](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/core/v3/health_check.proto#config-core-v3-healthcheck-httphealthcheck) to. Envoy will not route to clusters that fail health checks.
+
+### Health Check Host
+Permit to change the host of the healthcheck when using wildcard. Example: healthcheck for `*.my-app.example.com` can't work natively, you can configure a specific path with `yggdrasil.uswitch.com/healthcheck-host: health.my-app.example.com`.
 
 * [config.core.v3.HealthCheck.HttpHealthCheck.Path](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/core/v3/health_check.proto#envoy-v3-api-field-config-core-v3-healthcheck-httphealthcheck-path)
 
@@ -102,11 +108,19 @@ the `yggdrasil.uswitch.com/per-try-timeout` annotation will set the [config.rout
 
 The `yggdrasil.uswitch.com/timeout` annotation will set all of the above with the same value. This annotation has the lowest priority, if set with one of the other TO annotations, the specific one will override the general annotation.
 
+
 ### Weight
 Allows for adjusting the [load balancer weights](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/endpoint/v3/endpoint_components.proto#config-endpoint-v3-lbendpoint) in envoy.
 
 ### Retries
 Allows overwriting the default retry policy's [config.route.v3.RetryPolicy.RetryOn](https://www.envoyproxy.io/docs/envoy/v1.19.0/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-retrypolicy-retry-on) set by the `--retry-on` flag (default 5xx). Accepts a comma-separated list of retry-on policies.
+
+### mTLS
+Used to enable mTLS between client and Envoy.
+
+The `yggdrasil.uswitch.com/auth-tls-verify-client` annotation allow you enable or disable mTLS, can be either `true` or `false` (default).
+
+The `yggdrasil.uswitch.com/auth-tls-secret` annotation allow you to specify the name of the Kubernetes TLS secret containing the CA certificate used to verify client certificates.
 
 ### Example
 Below is an example of an ingress with some of the annotations specified
@@ -138,7 +152,7 @@ Downstream TLS certificates can be dynamically fetched and updated from Kubernet
 
 In this mode, only a single `certificate` may be specified in Yggdrasil configuration. It will be used for hosts with misconfigured or invalid secret.
 
-**Note**: ECDSA >256 keys are not supported by envoy and will be discarded. See https://github.com/envoyproxy/envoy/issues/10855
+**Note**: ECDSA P-256, P-384 and P-521 keys are now supported by envoy (see https://github.com/envoyproxy/envoy/issues/10855)
 
 ## Configuration
 Yggdrasil can be configured using a config file e.g:
@@ -146,6 +160,7 @@ Yggdrasil can be configured using a config file e.g:
 {
   "nodeName": "foo",
   "ingressClasses": ["multi-cluster", "multi-cluster-staging"],
+  "accessLog": "/var/log/envoy/",
   "syncSecrets": false,
   "certificates": [
     {
@@ -158,7 +173,9 @@ Yggdrasil can be configured using a config file e.g:
     {
       "token": "xxxxxxxxxxxxxxxx",
       "apiServer": "https://cluster1.api.com",
-      "ca": "pathto/cluster1/ca"
+      "ca": "pathto/cluster1/ca",
+      "maintenance": false,
+      "kubernetesClusterName": "cluster1"
     },
     {
       "tokenPath": "/path/to/a/token",
@@ -175,18 +192,29 @@ The list of certificates will be loaded by Yggdrasil and served to the Envoy nod
 The `ingressClasses` is a list of ingress classes that yggdrasil will watch for.
 Each cluster represents a different Kubernetes cluster with the token being a service account token for that cluster. `ca` is the Path to the ca certificate for that cluster.
 
+Maintenance is a new mode that allow to set a cluster in maintenance mode :
+- Upstream only in one cluster are keeped
+- Upstream in at least 1 cluster that is not in maintenance is deleted for the cluster in maintenance mode
+- Yggdrasil will Fatal if all clusters are in maintenance mode.
+
+This is optional and equal to `false` by default.
+
+kubernetesClusterName is the name of the cluster, it's only for information and will be used for metrics. Optional defaults to `""`
+
 ## Metrics
 Yggdrasil has a number of Go, gRPC, Prometheus, and Yggdrasil-specific metrics built in which can be reached by cURLing the `/metrics` path at the health API address/port (default: 8081). See [Flags](#Flags) for more information on configuring the health API address/port.
 
 The Yggdrasil-specific metrics which are available from the API are:
 
-| Name                        | Description                                    | Type     |
-|-----------------------------|------------------------------------------------|----------|
-| yggdrasil_cluster_updates   | Number of times the clusters have been updated | counter  |
-| yggdrasil_clusters          | Total number of clusters generated             | gauge    |
-| yggdrasil_ingresses         | Total number of matching ingress objects       | gauge    |
-| yggdrasil_listener_updates  | Number of times the listener has been updated  | counter  |
-| yggdrasil_virtual_hosts     | Total number of virtual hosts generated        | gauge    |
+| Name                                         | Description                                    | Type     |
+|----------------------------------------------|------------------------------------------------|----------|
+| yggdrasil_cluster_updates                    | Number of times the clusters have been updated | counter  |
+| yggdrasil_clusters                           | Total number of clusters generated             | gauge    |
+| yggdrasil_ingresses                          | Total number of matching ingress objects       | gauge    |
+| yggdrasil_listener_updates                   | Number of times the listener has been updated  | counter  |
+| yggdrasil_virtual_hosts                      | Total number of virtual hosts generated        | gauge    |
+| yggdrasil_kubernetes_cluster_in_maintenance | Return 1 if cluster in maintenance or 0        | gauge    |
+| yggdrasil_upstream_info                      | Provide informations relate to upstream        | gauge    |
 
 ## Flags
 ```
@@ -196,7 +224,8 @@ The Yggdrasil-specific metrics which are available from the API are:
 --config string                               config file
 --config-dump                                 Enable config dump endpoint at /configdump on the health-address HTTP server
 --debug                                       Log at debug level
---envoy-listener-ipv4-address string          IPv4 address by the envoy proxy to accept incoming connections (default "0.0.0.0")
+--access-log                                  path for the file logs
+--envoy-listener-ipv4-address strings         IPv4 addresses by the envoy proxy to accept incoming connections (default "0.0.0.0")
 --envoy-port uint32                           port by the envoy proxy to accept incoming connections (default 10000)
 --health-address string                       yggdrasil health API listen address (default "0.0.0.0:8081")
 -h, --help                                        help for yggdrasil

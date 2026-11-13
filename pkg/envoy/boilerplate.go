@@ -369,6 +369,9 @@ func (c *KubernetesConfigurator) makeConnectionManager(virtualHosts []*route.Vir
 		AccessLog:             accessLoggers,
 		UseRemoteAddress:      &wrapperspb.BoolValue{Value: c.useRemoteAddress},
 		StripMatchingHostPort: true,
+		// "example.com." is the same name as "example.com": without this, Envoy
+		// matches vhost domains exactly and answers 404 to a fully qualified Host.
+		StripTrailingHostDot: true,
 	}, nil
 }
 

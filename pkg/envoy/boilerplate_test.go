@@ -415,3 +415,15 @@ func TestMakeClusterDnsRefreshRate(t *testing.T) {
 		})
 	}
 }
+
+func TestMakeConnectionManagerStripsTrailingHostDot(t *testing.T) {
+	c := NewKubernetesConfigurator("a", nil, "d", []string{"bar"}, []string{"192.168.0.0/16"}, "/var/log/envoy/")
+
+	connManager, err := c.makeConnectionManager(nil, "")
+	if err != nil {
+		t.Fatalf("makeConnectionManager: %v", err)
+	}
+	if !connManager.StripTrailingHostDot {
+		t.Error("expected strip_trailing_host_dot so that \"example.com.\" matches the \"example.com\" vhost")
+	}
+}

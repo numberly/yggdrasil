@@ -1,0 +1,7 @@
+[tool.commitizen]
+name = "cz_conventional_commits"
+# No version file in the Go code: the git tag is the version.
+version_provider = "scm"
+# Prefixed so fork releases never collide with upstream vX.Y.Z tags.
+tag_format = "numberly-v$version"
+update_changelog_on_bump = true

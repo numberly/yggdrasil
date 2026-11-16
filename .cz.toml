@@ -5,3 +5,7 @@ version_provider = "scm"
 # Prefixed so fork releases never collide with upstream vX.Y.Z tags.
 tag_format = "numberly-v$version"
 update_changelog_on_bump = true
+# Upstream tags (vX.Y.Z, certs-1) come in with each sync: not fork versions.
+ignored_tag_formats = ["v*", "certs-*"]
+# Annotated tags, so `git push --follow-tags` publishes them with the bump commit.
+annotated_tag = true

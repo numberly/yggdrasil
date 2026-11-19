@@ -162,7 +162,7 @@ func TestGenerateIntoTwoCerts(t *testing.T) {
 	}
 
 	assertNumberOfVirtualHosts(t, listener.FilterChains[0], 1)
-	assertServerNames(t, listener.FilterChains[0], []string{"*.internal.api.com"})
+	assertServerNames(t, listener.FilterChains[0], []string{"*.internal.api.com", "*.internal.api.com."})
 
 	assertNumberOfVirtualHosts(t, listener.FilterChains[1], 1)
 	assertServerNames(t, listener.FilterChains[1], nil)
@@ -181,7 +181,7 @@ func TestDynamicTLSFallbackRetainsMTLS(t *testing.T) {
 	}
 
 	for _, filterChain := range resources {
-		if len(filterChain.FilterChainMatch.ServerNames) != 1 || filterChain.FilterChainMatch.ServerNames[0] != "app.example.com" {
+		if len(filterChain.FilterChainMatch.ServerNames) != 2 || filterChain.FilterChainMatch.ServerNames[0] != "app.example.com" {
 			continue
 		}
 		config, err := filterChain.TransportSocket.GetTypedConfig().UnmarshalNew()

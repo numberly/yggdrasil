@@ -441,8 +441,14 @@ func (c *KubernetesConfigurator) makeFilterChain(certificate Certificate, virtua
 	hosts := []string{}
 
 	for _, host := range certificate.Hosts {
-		if host != "*" {
-			hosts = append(hosts, host)
+		if host == "*" {
+			continue
+		}
+		hosts = append(hosts, host)
+		// Clients following FQDN links (e.g. QR codes) send SNI "example.com.":
+		// match them to the same chain, Host is normalised by StripTrailingHostDot.
+		if !strings.HasSuffix(host, ".") {
+			hosts = append(hosts, host+".")
 		}
 	}
 

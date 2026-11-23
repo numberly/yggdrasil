@@ -1,3 +1,9 @@
+## numberly-v1.0.2 (2026-11-23)
+
+### Fix
+
+- **envoy**: match SNI with trailing dot to the host filter chain
+
 ## numberly-v1.0.1 (2026-11-16)
 
 ### Fix
